@@ -100,7 +100,17 @@ def _build_fp8_linear_class():
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             shape = x.shape
-            x2 = x.reshape(-1, shape[-1])
+            # Round to the compute dtype BEFORE the fp8 cast: eager comfy
+            # materializes the incoming activation (e.g. the gelu in
+            # linear_input_act) as bf16 before quantizing, so keep that
+            # boundary under fusion too (no-op in eager). NOTE: compiled
+            # mode is still not bit-identical to eager — inductor's
+            # elementwise math (libdevice tanh etc.) differs in fp32 ULPs,
+            # which occasionally flips an fp8 rounding bucket (~one fp8 ULP
+            # per affected element). That is inherent to torch.compile;
+            # quality is gated by the same-seed bench A/B, and the SWAP
+            # itself (compile: false) remains bit-identical.
+            x2 = x.reshape(-1, shape[-1]).to(self.out_dtype)
             x_q = x2.clamp(-self.FP8_MAX, self.FP8_MAX).to(torch.float8_e4m3fn).contiguous()
             out = scaled_mm_v2(
                 x_q,
