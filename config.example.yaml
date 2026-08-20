@@ -34,7 +34,7 @@ warmup_on_start: true
 # The fp8 linears are swapped for bit-identical compile-friendly twins at
 # startup (probe-verified); compile: false runs stock comfy modules.
 # compile: true
-# compile_scope: model        # model | blocks (blocks = per-transformer-block graphs)
+# compile_scope: blocks      # blocks (default; outer guide bookkeeping stays eager) | model
 # inductor_cache_dir: /workspace/inductor_cache
 # FA4 attention (flash_attn.cute; sm90+ — H200/B200). Masked segments (the
 # stage-1 guide bias) always stay on SDPA. fp8 attention per stage is

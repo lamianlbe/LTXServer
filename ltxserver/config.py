@@ -138,7 +138,12 @@ class ServerConfig:
     # Changing this (or attention settings) changes the compiled graphs —
     # warmup recompiles, so keep inductor_cache_dir persistent.
     compile: bool = False
-    compile_scope: str = "model"  # model = one graph per DiT | blocks = per transformer block
+    # blocks (default) compiles the 48 transformer blocks (~95% of compute)
+    # and leaves comfy's outer glue eager — the guide-keyframe bookkeeping in
+    # _process_input does a data-dependent .item() that can never be captured
+    # (observed breaking whole-model graphs on stage 1). model = one graph
+    # per DiT, only sensible for guide-free recipes.
+    compile_scope: str = "blocks"  # blocks | model
     inductor_cache_dir: str = ""  # "" = torch default (NOT persistent across restarts)
     # Attention backend for BOTH DiTs. sdpa = comfy's pytorch attention (the
     # exact baseline). fa4 = flash_attn.cute (Hopper/Blackwell datacenter

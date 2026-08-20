@@ -178,3 +178,16 @@ def compile_model(model_patcher, *, scope: str, label: str) -> None:
     set_torch_compile_wrapper(model_patcher, backend="inductor", mode="default",
                               fullgraph=False, dynamic=False, keys=keys)
     logger.info("[%s] torch.compile attached (scope=%s, %d module(s))", label, scope, len(keys))
+
+
+def log_dynamo_counters(tag: str, log=logger.info) -> None:
+    """One-line dynamo health readout (graphs captured / graph breaks)."""
+    from torch._dynamo.utils import counters
+
+    stats = counters["stats"]
+    breaks = sum(counters["graph_break"].values())
+    log("[%s] dynamo: %s graph(s) captured, %s graph break(s)%s", tag,
+        stats.get("unique_graphs", 0), breaks,
+        "" if not breaks else " — top: " + "; ".join(
+            f"{k.strip()[:90]} x{v}" for k, v in
+            sorted(counters["graph_break"].items(), key=lambda kv: -kv[1])[:3]))

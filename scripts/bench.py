@@ -86,6 +86,9 @@ def main() -> None:
     t0 = time.perf_counter()
     generate_for_mode(recipe, cfg, mode, request)
     print(f"[bench:{args.tag}] warmup (compile) wall: {time.perf_counter() - t0:.1f}s", flush=True)
+    if cfg.compile:
+        from ltxserver.perf import log_dynamo_counters
+        log_dynamo_counters(args.tag, log=lambda msg, *a: print(msg % a, flush=True))
 
     times = []
     for i in range(args.runs):

@@ -74,8 +74,12 @@ saturating scale-1.0 input cast, same `scaled_mm_v2` call with the bias
 fused. Each swap is probe-verified **bit-identical** to the layer it
 replaces and the server refuses to start otherwise, so a comfy upgrade that
 changes fp8 numerics can never ship silently different pixels.
-`compile_scope: blocks` compiles per transformer block (48 small graphs,
-faster warmup) instead of one whole-model graph. First warmup per mode
+`compile_scope: blocks` (the default) compiles per transformer block —
+48 small shared-code graphs covering ~95% of the compute — and leaves
+comfy's outer glue eager; that glue includes the stage-1 guide-keyframe
+bookkeeping whose data-dependent `.item()` can never be captured, so
+`model` scope graph-breaks there and is only sensible for guide-free
+recipes. First warmup per mode
 compiles for minutes — point `inductor_cache_dir` at a persistent volume;
 after that, restarts reuse the kernel cache. Inductor knobs mirror the
 FastVideo production server (`shape_padding=False` is load-bearing on
