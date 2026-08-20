@@ -252,6 +252,11 @@ class LtxRecipe:
                 apply_apg=False, apg_cfg_scale=cfg.apg_cfg_scale,
                 eta=cfg.apg_eta, norm_threshold=cfg.apg_norm_threshold,
             )
+            stg_scales = cfg.resolved_stg_scale_values()
+            if any(s != 0.0 for s in stg_scales):
+                logger.info("STG perturbed pass ENABLED (scales %s, layers %s): one extra DiT "
+                            "forward per step with a non-zero scale", stg_scales,
+                            cfg.resolved_stg_layers_indices())
             (noise,) = call_node(ncs.RandomNoise, noise_seed=int(request.seed))
             (sampler1,) = call_node(ncs.KSamplerSelect, sampler_name="euler_ancestral")
             (sigmas1,) = call_node(ncs.ManualSigmas, sigmas=_csv(cfg.stage1_sigmas))

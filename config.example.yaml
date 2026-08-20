@@ -69,6 +69,12 @@ highvram: true              # pin all models in GPU memory (required for serving
 #                  0.7150, 0.6030, 0.4824, 0.3618, 0.2412, 0.1206, 0.0]
 # cfg_values_by_sigma: [2, 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 # cfg_star_rescale: true
+# STG (off by default — [9999] layers + zero scales = no perturbed pass).
+# The desktop workflow's node carries scales 2,1.5,1,... with [9999] layers,
+# which BURNS one full DiT forward per step for a mathematically zero term;
+# paste them only to reproduce that behavior for timing A/Bs.
+# stg_layers_indices: ""
+# stg_scale_values: []
 # skip_steps_sigma_threshold: 1.0
 # guide_strength: 0.8
 # guide_longer_size: 1536

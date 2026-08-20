@@ -176,10 +176,15 @@ class ServerConfig:
     cfg_values_by_sigma: list[float] = field(default_factory=lambda: list(DEFAULT_CFG_VALUES))
     cfg_star_rescale: bool = True
     skip_steps_sigma_threshold: float = 1.0
-    # STG stays numerically inert in the reference workflow: the scale values
-    # mirror the cfg list but every step's skip-layer list is [9999], which
-    # names no real block, so the perturbed pass equals the plain pass.
-    stg_scale_values: list[float] | None = None   # None = mirror cfg_values_by_sigma
+    # STG is numerically inert in the reference workflow: its skip-layer
+    # lists are all [9999] (no real block), so the perturbed pass equals the
+    # plain pass and scale*(pos - perturbed) is exactly zero for ANY scale.
+    # The workflow node still carries non-zero scales (2, 1.5, 1, ...),
+    # which makes the guider run that dead perturbed pass — a FULL extra DiT
+    # forward EVERY step. Default the scales to zero instead: bit-identical
+    # output (the term is zero either way), one forward per step saved.
+    # Anyone enabling real STG sets stg_layers_indices AND these scales.
+    stg_scale_values: list[float] | None = None   # None = all 0.0 (skip the dead pass)
     stg_rescale_values: list[float] | None = None  # None = all 1.0
     stg_layers_indices: str = ""                   # "" = "[9999]" per entry
     apg_cfg_scale: float = 1.0
@@ -215,7 +220,8 @@ class ServerConfig:
         return len(self.stage1_sigmas) - 1
 
     def resolved_stg_scale_values(self) -> list[float]:
-        return list(self.stg_scale_values) if self.stg_scale_values else list(self.cfg_values_by_sigma)
+        return (list(self.stg_scale_values) if self.stg_scale_values
+                else [0.0] * len(self.cfg_values_by_sigma))
 
     def resolved_stg_rescale_values(self) -> list[float]:
         return (list(self.stg_rescale_values) if self.stg_rescale_values
