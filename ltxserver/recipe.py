@@ -222,16 +222,25 @@ class LtxRecipe:
             v1, a1 = call_node(lt.LTXVSeparateAVLatent, av_latent=out1)
 
             # --- stage 2: x1.5 upsample + inplace keyframe + cfg_pp refine ---
+            # The appended guide tokens must leave the latent AND the
+            # conditioning BEFORE upsampling: comfy >= 0.33 refuses
+            # keyframe_idxs recorded at a different spatial resolution than
+            # the sampled latent (the original workflow cropped only after
+            # stage 2, which older comfy tolerated silently). Stage 2 then
+            # runs guide-free — its first-frame anchoring is the
+            # LTXVImgToVideoInplace keyframe, exactly as in the workflow.
+            pos2, neg2, v1_cropped = call_node(lt.LTXVCropGuides, positive=pos,
+                                               negative=neg, latent=v1)
             (upsampled,) = call_node(h.nodes_lt_upsampler.LTXVLatentUpsampler,
-                                     samples=v1, upscale_model=self.upscale_model,
+                                     samples=v1_cropped, upscale_model=self.upscale_model,
                                      vae=self.vae)
             (inplace,) = call_node(lt.LTXVImgToVideoInplace, vae=self.vae,
                                    image=guide_first[0:1], latent=upsampled,
                                    strength=1.0, bypass=False)
             (av2,) = call_node(lt.LTXVConcatAVLatent, video_latent=inplace,
                                audio_latent=a1)
-            (guider2,) = call_node(ncs.CFGGuider, model=self.model_s2, positive=pos,
-                                   negative=neg, cfg=1.0)
+            (guider2,) = call_node(ncs.CFGGuider, model=self.model_s2, positive=pos2,
+                                   negative=neg2, cfg=1.0)
             (sampler2,) = call_node(ncs.KSamplerSelect,
                                     sampler_name="euler_ancestral_cfg_pp")
             (sigmas2,) = call_node(ncs.ManualSigmas, sigmas=_csv(cfg.stage2_sigmas))
@@ -239,11 +248,11 @@ class LtxRecipe:
                              sampler=sampler2, sigmas=sigmas2, latent_image=av2)[0]
             t_stage2 = time.perf_counter()
             v2, a2 = call_node(lt.LTXVSeparateAVLatent, av_latent=out2)
-            _, _, v2_cropped = call_node(lt.LTXVCropGuides, positive=pos, negative=neg,
-                                         latent=v2)
+            # Guides were already cropped before the upsample, so the
+            # workflow's final LTXVCropGuides is a no-op here — decode directly.
 
             # --- decode -------------------------------------------------------
-            (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v2_cropped)
+            (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v2)
             (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a2,
                                      audio_vae=self.audio_vae)
 
