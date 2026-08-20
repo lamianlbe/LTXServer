@@ -76,7 +76,7 @@ def find_node_class(nodes_module: ModuleType, name: str) -> Any:
                    f"(have: {[k for k in mapping if 'LTX' in k or 'STG' in k][:20]})")
 
 
-def boot(*, use_sage_attention: bool, disable_smart_memory: bool,
+def boot(*, use_sage_attention: bool, highvram: bool,
          reserve_vram_gb: float, model_files: dict[str, str]) -> ComfyHandles:
     """Initialize embedded ComfyUI and register model/plugin paths.
 
@@ -93,8 +93,11 @@ def boot(*, use_sage_attention: bool, disable_smart_memory: bool,
     import comfy.options  # noqa: F401  (args_parsing stays False -> defaults)
     from comfy.cli_args import args
     args.use_sage_attention = bool(use_sage_attention)
-    if disable_smart_memory and hasattr(args, "disable_smart_memory"):
-        args.disable_smart_memory = True
+    # --highvram pins models in GPU memory (comfy otherwise unloads to CPU
+    # after each use — per-request PCIe reloads). NOTE: --disable-smart-memory
+    # is the OPPOSITE of resident (it forces aggressive offload); never set it
+    # for serving.
+    args.highvram = bool(highvram)
     if reserve_vram_gb and hasattr(args, "reserve_vram"):
         args.reserve_vram = float(reserve_vram_gb)
 
@@ -110,9 +113,9 @@ def boot(*, use_sage_attention: bool, disable_smart_memory: bool,
         model_names[category] = path.name
 
     import comfy.model_management as model_management
-    logger.info("comfy device: %s | sage attention: %s | smart memory disabled: %s",
-                model_management.get_torch_device(), args.use_sage_attention,
-                getattr(args, "disable_smart_memory", False))
+    logger.info("comfy device: %s | sage attention: %s | highvram (models pinned): %s | "
+                "vram state: %s", model_management.get_torch_device(), args.use_sage_attention,
+                args.highvram, model_management.vram_state.name)
 
     # -- node registry (needs a PromptServer instance like main.py makes) -----
     import nodes

@@ -124,9 +124,12 @@ class ServerConfig:
     # runs poorly on Blackwell and needs a manual source build
     # (thu-ml/SageAttention).
     use_sage_attention: bool = False
-    # Keep every model resident on the GPU (comfy's smart offload can shuffle
-    # weights between requests; a dedicated serving GPU should not).
-    disable_smart_memory: bool = True
+    # Pin every model in GPU memory (comfy --highvram): without it comfy
+    # unloads models to CPU after use, so a server pays a full PCIe reload
+    # per request AND between the stages inside one request. Required for
+    # serving; set false only on VRAM-starved debug boxes (comfy's smart
+    # memory then offloads as needed).
+    highvram: bool = True
     # Reserved VRAM comfy leaves free (GB); 0 = comfy default.
     reserve_vram_gb: float = 0.0
 
@@ -287,6 +290,10 @@ def load_config(path: str | Path) -> ServerConfig:
             raise ValueError(f"{path}: 's3' must be a mapping")
         s3_cfg = S3Config(**s3_raw)
         s3_cfg.validate()
+    if "disable_smart_memory" in raw:
+        raise ValueError(f"{path}: 'disable_smart_memory' is gone — it meant the OPPOSITE of "
+                         "resident models (comfy's flag forces offload-after-use). Use "
+                         "'highvram: true' (the default) to pin models in GPU memory.")
     known = {f for f in ServerConfig.__dataclass_fields__ if f not in ("models", "modes", "s3")}
     unknown = set(raw) - known
     if unknown:

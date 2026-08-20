@@ -20,7 +20,7 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     setup_environment(cfg.cuda_visible_devices, inductor_cache_dir=cfg.inductor_cache_dir)
     handles = boot(
         use_sage_attention=cfg.use_sage_attention,
-        disable_smart_memory=cfg.disable_smart_memory,
+        highvram=cfg.highvram,
         reserve_vram_gb=cfg.reserve_vram_gb,
         model_files={
             "checkpoints": cfg.models.checkpoint,

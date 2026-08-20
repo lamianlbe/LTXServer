@@ -46,7 +46,8 @@ warmup_on_start: true
 # --- ComfyUI runtime -------------------------------------------------------
 use_sage_attention: false   # SDPA (default, exact). Sage = opt-in experiment,
                             # needs a manual source build; poor on Blackwell.
-disable_smart_memory: true  # keep every model resident on the GPU
+highvram: true              # pin all models in GPU memory (required for serving:
+                            # without it comfy reloads weights over PCIe per request)
 # reserve_vram_gb: 0
 
 # Stage-1 only (A/B & debugging): skip the x1.5 upsample + refine pass and
