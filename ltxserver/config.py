@@ -77,8 +77,11 @@ class ModelPaths:
     text_encoder: str
     latent_upsampler: str
 
-    def validate(self) -> None:
-        for name in ("checkpoint", "stage2_transformer", "text_encoder", "latent_upsampler"):
+    def validate(self, stage2_enabled: bool = True) -> None:
+        names = ["checkpoint", "text_encoder"]
+        if stage2_enabled:
+            names += ["stage2_transformer", "latent_upsampler"]
+        for name in names:
             path = Path(getattr(self, name))
             if not path.is_file():
                 raise ValueError(f"models.{name}: not a file: {path}")
@@ -146,6 +149,11 @@ class ServerConfig:
     apg_cfg_scale: float = 1.0
     apg_eta: float = 1.0
     apg_norm_threshold: float = 1.0
+    # Run only stage 1 (skip the x1.5 upsample + refine pass) and decode
+    # the stage-1 result directly at the mode resolution. For stage-level
+    # A/B and fast iteration; the stage-2 transformer and the upsampler are
+    # not loaded when this is false.
+    stage2_enabled: bool = True
     # Guide (first/last frame) conditioning.
     guide_strength: float = DEFAULT_GUIDE_STRENGTH
     guide_longer_size: int = DEFAULT_GUIDE_LONGER_SIZE
@@ -195,7 +203,7 @@ def _validate_sigmas(name: str, sigmas: list[float]) -> None:
 
 
 def validate_config(cfg: ServerConfig, source: str = "config") -> None:
-    cfg.models.validate()
+    cfg.models.validate(stage2_enabled=cfg.stage2_enabled)
     if not cfg.modes:
         raise ValueError(f"{source}: 'modes' must list at least one combination")
     for mode in cfg.modes:

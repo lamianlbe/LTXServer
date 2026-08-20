@@ -34,6 +34,11 @@ use_sage_attention: false   # SDPA (default, exact). Sage = opt-in experiment,
 disable_smart_memory: true  # keep every model resident on the GPU
 # reserve_vram_gb: 0
 
+# Stage-1 only (A/B & debugging): skip the x1.5 upsample + refine pass and
+# return the decoded stage-1 result at the mode resolution. The stage-2
+# transformer and the upsampler are not loaded.
+# stage2_enabled: false
+
 # --- recipe overrides (defaults = the reference workflow) ------------------
 # stage1_sigmas: [1.0, 0.99987238, 0.99820748, 0.99001548, 0.96332988,
 #                 0.89394948, 0.744596, 0.47298248, 0.20186216, 0.04708576, 0.0]

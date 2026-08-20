@@ -112,9 +112,13 @@ class LtxRecipe:
         logger.info("loading checkpoint (stage-1 merged base): %s", names.checkpoints)
         model_s1, _base_clip, vae = call_node(nodes.CheckpointLoaderSimple,
                                               ckpt_name=names.checkpoints)[:3]
-        logger.info("loading stage-2 transformer: %s", names.diffusion_models)
-        (model_s2,) = call_node(nodes.UNETLoader, unet_name=names.diffusion_models,
-                                weight_dtype="default")
+        model_s2 = None
+        if cfg.stage2_enabled:
+            logger.info("loading stage-2 transformer: %s", names.diffusion_models)
+            (model_s2,) = call_node(nodes.UNETLoader, unet_name=names.diffusion_models,
+                                    weight_dtype="default")
+        else:
+            logger.info("stage 2 disabled: stage-2 transformer and upsampler are not loaded")
         logger.info("loading text encoder: %s (+ connectors from the checkpoint)",
                     names.text_encoders)
         (clip,) = call_node(handles.nodes_lt_audio.LTXAVTextEncoderLoader,
@@ -123,8 +127,10 @@ class LtxRecipe:
                             device="default")
         (audio_vae,) = call_node(handles.nodes_lt_audio.LTXVAudioVAELoader,
                                  ckpt_name=names.checkpoints)
-        (upscale_model,) = call_node(handles.nodes_hunyuan.LatentUpscaleModelLoader,
-                                     model_name=names.latent_upscale_models)
+        upscale_model = None
+        if cfg.stage2_enabled:
+            (upscale_model,) = call_node(handles.nodes_hunyuan.LatentUpscaleModelLoader,
+                                         model_name=names.latent_upscale_models)
         self.model_s1, self.model_s2 = model_s1, model_s2
         self.clip, self.vae, self.audio_vae = clip, vae, audio_vae
         self.upscale_model = upscale_model
@@ -231,6 +237,17 @@ class LtxRecipe:
             # LTXVImgToVideoInplace keyframe, exactly as in the workflow.
             pos2, neg2, v1_cropped = call_node(lt.LTXVCropGuides, positive=pos,
                                                negative=neg, latent=v1)
+
+            if not cfg.stage2_enabled:
+                # Stage-1-only: decode the cropped stage-1 latent directly at
+                # the mode resolution (audio likewise comes from stage 1 —
+                # the refine pass would otherwise also touch it).
+                (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v1_cropped)
+                (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a1,
+                                         audio_vae=self.audio_vae)
+                return self._package(image_batch, audio_out, mode, request,
+                                     strengths_note, t0, t_stage1, t_stage1)
+
             (upsampled,) = call_node(h.nodes_lt_upsampler.LTXVLatentUpsampler,
                                      samples=v1_cropped, upscale_model=self.upscale_model,
                                      vae=self.vae)
@@ -255,17 +272,23 @@ class LtxRecipe:
             (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v2)
             (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a2,
                                      audio_vae=self.audio_vae)
+            return self._package(image_batch, audio_out, mode, request,
+                                 strengths_note, t0, t_stage1, t_stage2)
 
-            frames = [(frame.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
-                      for frame in image_batch]
-            waveform = audio_out["waveform"]
-            audio_np = waveform[0].float().cpu().numpy() if waveform is not None else None
-            sample_rate = int(audio_out.get("sample_rate", 0)) or None
-
+    def _package(self, image_batch, audio_out, mode: Mode, request: GenerationRequest,
+                 strengths_note: str, t0: float, t_stage1: float, t_stage2: float) -> dict:
+        import torch
+        frames = [(frame.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
+                  for frame in image_batch]
+        waveform = audio_out["waveform"]
+        audio_np = waveform[0].float().cpu().numpy() if waveform is not None else None
+        sample_rate = int(audio_out.get("sample_rate", 0)) or None
         gen_seconds = time.perf_counter() - t0
-        logger.info("generated %dx%d f%d seed=%s (%s): stage1 %.1fs, stage2 %.1fs, total %.1fs",
+        stage2_seconds = t_stage2 - t_stage1
+        logger.info("generated %dx%d f%d seed=%s (%s): stage1 %.1fs, stage2 %s, total %.1fs",
                     mode.width, mode.height, mode.num_frames, request.seed, strengths_note,
-                    t_stage1 - t0, t_stage2 - t_stage1, gen_seconds)
+                    t_stage1 - t0, f"{stage2_seconds:.1f}s" if stage2_seconds > 0 else "skipped",
+                    gen_seconds)
         return {
             "frames": frames,
             "audio": audio_np,
