@@ -89,6 +89,15 @@ def _build_fp8_linear_class():
             self.out_dtype = out_dtype
             self.out_features = payload.shape[0]
 
+        @property
+        def weight(self):
+            # comfy.ops.linear_input_act reads ``linear.weight`` to detect its
+            # fused-INT8 fast path (the FFN down-projection goes through it).
+            # Hand back the raw fp8 payload — a plain tensor, NOT a
+            # QuantizedTensor — so that caller (and any other introspection)
+            # falls through to ``linear(act(x))``, i.e. our forward.
+            return self.weight_fp8
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             shape = x.shape
             x2 = x.reshape(-1, shape[-1])
@@ -139,14 +148,21 @@ def prepare_model_for_compile(model_patcher, label: str) -> int:
 
             probe = torch.randn(2, 16, payload.shape[1], device=payload.device,
                                 dtype=out_dtype) * 3.0
-            ref = module(probe)
-            got = twin(probe)
-            if not torch.equal(ref, got):
-                max_diff = (ref.float() - got.float()).abs().max().item()
-                raise RuntimeError(
-                    f"{label}.{name}: compile-friendly fp8 linear is NOT bit-identical to the "
-                    f"comfy layer it would replace (max diff {max_diff}); refusing to compile. "
-                    "A comfy/comfy_kitchen upgrade likely changed fp8 numerics — re-verify.")
+            # Two probes: the plain forward, and comfy.ops.linear_input_act —
+            # the one external caller that reaches around the module's forward
+            # (the FFN down-projection), which reads .weight first.
+            import comfy.ops as comfy_ops
+            for tag, ref, got in (
+                ("forward", module(probe), twin(probe)),
+                ("linear_input_act", comfy_ops.linear_input_act(module, probe, "gelu_tanh"),
+                 comfy_ops.linear_input_act(twin, probe, "gelu_tanh")),
+            ):
+                if not torch.equal(ref, got):
+                    max_diff = (ref.float() - got.float()).abs().max().item()
+                    raise RuntimeError(
+                        f"{label}.{name} [{tag}]: compile-friendly fp8 linear is NOT bit-identical "
+                        f"to the comfy layer it would replace (max diff {max_diff}); refusing to "
+                        "compile. A comfy/comfy_kitchen upgrade likely changed fp8 numerics — re-verify.")
             comfy.utils.set_attr(diffusion_model, name, twin)
             swapped += 1
 
