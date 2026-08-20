@@ -17,7 +17,7 @@ logger = logging.getLogger("ltxserver.engine")
 
 def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     """Environment -> embedded comfy -> models resident. Call once."""
-    setup_environment(cfg.cuda_visible_devices)
+    setup_environment(cfg.cuda_visible_devices, inductor_cache_dir=cfg.inductor_cache_dir)
     handles = boot(
         use_sage_attention=cfg.use_sage_attention,
         disable_smart_memory=cfg.disable_smart_memory,
@@ -29,7 +29,25 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
             "latent_upscale_models": cfg.models.latent_upsampler,
         },
     )
-    return LtxRecipe(handles, cfg)
+    recipe = LtxRecipe(handles, cfg)
+
+    stage_models = [("stage1", recipe.model_s1, cfg.fa4_fp8_stage1)]
+    if recipe.model_s2 is not None:
+        stage_models.append(("stage2", recipe.model_s2, cfg.fa4_fp8_stage2))
+
+    if cfg.attention_backend == "fa4":
+        from .attention import install_fa4_override
+        for label, patcher, fp8 in stage_models:
+            install_fa4_override(patcher, fp8=fp8, label=label)
+
+    if cfg.compile:
+        from .perf import apply_inductor_settings, compile_model, prepare_model_for_compile
+        apply_inductor_settings()
+        for label, patcher, _fp8 in stage_models:
+            prepare_model_for_compile(patcher, label)
+            compile_model(patcher, scope=cfg.compile_scope, label=label)
+
+    return recipe
 
 
 def generate_for_mode(recipe: LtxRecipe, cfg: ServerConfig, mode: Mode,

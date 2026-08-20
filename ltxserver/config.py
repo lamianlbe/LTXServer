@@ -130,6 +130,27 @@ class ServerConfig:
     # Reserved VRAM comfy leaves free (GB); 0 = comfy default.
     reserve_vram_gb: float = 0.0
 
+    # --- performance -----------------------------------------------------------
+    # torch.compile both DiTs (inductor, via comfy's official wrapper). The
+    # fp8 QuantizedTensor linears are first swapped for compile-friendly
+    # twins that are probe-verified BIT-IDENTICAL (see ltxserver/perf.py);
+    # with compile off, the model runs stock comfy modules end to end.
+    # Changing this (or attention settings) changes the compiled graphs —
+    # warmup recompiles, so keep inductor_cache_dir persistent.
+    compile: bool = False
+    compile_scope: str = "model"  # model = one graph per DiT | blocks = per transformer block
+    inductor_cache_dir: str = ""  # "" = torch default (NOT persistent across restarts)
+    # Attention backend for BOTH DiTs. sdpa = comfy's pytorch attention (the
+    # exact baseline). fa4 = flash_attn.cute (Hopper/Blackwell datacenter
+    # GPUs; needs the pinned source build — see install.sh notes); masked
+    # attention segments (the stage-1 guide bias) always fall back to sdpa,
+    # mirroring the FastVideo server. fa4_fp8_stage1/2 additionally run that
+    # stage's unmasked attention with fp8 q/k/v (per-head descales) at the
+    # fp8 tensor-core rate — a numerics/speed trade to A/B per stage.
+    attention_backend: str = "sdpa"  # sdpa | fa4
+    fa4_fp8_stage1: bool = False
+    fa4_fp8_stage2: bool = False
+
     # --- recipe (defaults = the reference workflow) ---------------------------
     stage1_sigmas: list[float] = field(default_factory=lambda: list(DEFAULT_STAGE1_SIGMAS))
     stage2_sigmas: list[float] = field(default_factory=lambda: list(DEFAULT_STAGE2_SIGMAS))
@@ -229,6 +250,14 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
     cvd = cfg.cuda_visible_devices
     if cvd and not all(p.strip().isdigit() for p in cvd.split(",")):
         raise ValueError(f"{source}: cuda_visible_devices must be comma-separated GPU indices")
+    if cfg.compile_scope not in ("model", "blocks"):
+        raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
+    if cfg.attention_backend not in ("sdpa", "fa4"):
+        raise ValueError(f"{source}: attention_backend must be sdpa | fa4, got {cfg.attention_backend!r}")
+    if (cfg.fa4_fp8_stage1 or cfg.fa4_fp8_stage2) and cfg.attention_backend != "fa4":
+        raise ValueError(f"{source}: fa4_fp8_stage1/2 require attention_backend: fa4")
+    if cfg.attention_backend == "fa4" and cfg.use_sage_attention:
+        raise ValueError(f"{source}: attention_backend: fa4 and use_sage_attention are mutually exclusive")
     n_stg = len(cfg.resolved_stg_scale_values())
     if n_stg < len(sig) - 1:
         raise ValueError(f"{source}: stg_scale_values needs at least {len(sig) - 1} entries")

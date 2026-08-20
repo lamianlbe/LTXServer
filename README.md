@@ -59,6 +59,52 @@ closest-resolution configured mode. FLF: a `last_frame` upload adds a
 tail keyframe in stage 1 (`frame_indices "0, -1"`, batched when its
 strength equals `guide_strength`, appended separately otherwise).
 
+## Performance: torch.compile + FA4
+
+Both are off by default; the default configuration runs stock comfy modules
+and pytorch SDPA end to end.
+
+**torch.compile** (`compile: true`) wraps both DiTs via comfy's official
+`set_torch_compile_wrapper`. Comfy's fp8 `QuantizedTensor` layers graph-break
+twice per linear under dynamo (the layout `Params` dataclass is untraceable
+— measured ~2500 splits per forward), so at startup every quantized linear
+is swapped for a compile-friendly twin: same payload, same scale, same
+saturating scale-1.0 input cast, same `scaled_mm_v2` call with the bias
+fused. Each swap is probe-verified **bit-identical** to the layer it
+replaces and the server refuses to start otherwise, so a comfy upgrade that
+changes fp8 numerics can never ship silently different pixels.
+`compile_scope: blocks` compiles per transformer block (48 small graphs,
+faster warmup) instead of one whole-model graph. First warmup per mode
+compiles for minutes — point `inductor_cache_dir` at a persistent volume;
+after that, restarts reuse the kernel cache. Inductor knobs mirror the
+FastVideo production server (`shape_padding=False` is load-bearing on
+Blackwell).
+
+**FA4** (`attention_backend: fa4`) installs an `optimized_attention`
+override per model via `transformer_options` — again comfy's official hook.
+Unmasked attention runs `flash_attn.cute` (needs sm90+, i.e. H200/B200, and
+the pinned install from `install.sh`); the stage-1 guide-bias segments are
+masked and always stay on SDPA, mirroring the FastVideo server.
+`fa4_fp8_stage1/2` additionally quantize that stage's q/k/v to fp8 e4m3
+with per-(batch, head) descales — both attention GEMMs at the fp8
+tensor-core rate, bf16 out. fp8 attention is sm100-only upstream: **B200
+yes, H200 bf16-FA4 only.** The kernel calls are torch custom ops with fake
+kernels, so FA4 composes with `compile: true`.
+
+Every combination changes the compiled graphs — re-warm after toggling.
+A/B with `scripts/bench.py`:
+
+```bash
+python scripts/bench.py --config config.yaml --tag sdpa
+python scripts/bench.py --config config.yaml --tag fa4 --set attention_backend=fa4
+python scripts/bench.py --config config.yaml --tag fa4_compiled \
+    --set attention_backend=fa4 --set compile=true
+```
+
+Same seed per tag ⇒ the mp4s are directly comparable for quality; the
+summary lines give the speed. Recommended ladder: `sdpa` (baseline) → `fa4`
+→ `compile` → `fa4+compile` → `+fa4_fp8_stage2` — one variable at a time.
+
 ## Fidelity notes
 
 * **Attention**: pytorch SDPA by default — the exact kernel, and the

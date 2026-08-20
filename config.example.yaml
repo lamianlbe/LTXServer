@@ -28,6 +28,21 @@ api_keys: []            # non-empty = X-API-Key / Bearer auth on /v1/*
 max_consecutive_failures: 3
 warmup_on_start: true
 
+# --- performance -------------------------------------------------------------
+# torch.compile both DiTs. First warmup per mode compiles (minutes); point
+# inductor_cache_dir at a persistent volume so restarts reuse the kernels.
+# The fp8 linears are swapped for bit-identical compile-friendly twins at
+# startup (probe-verified); compile: false runs stock comfy modules.
+# compile: true
+# compile_scope: model        # model | blocks (blocks = per-transformer-block graphs)
+# inductor_cache_dir: /workspace/inductor_cache
+# FA4 attention (flash_attn.cute; sm90+ — H200/B200). Masked segments (the
+# stage-1 guide bias) always stay on SDPA. fp8 attention per stage is
+# sm100-only (B200): q/k/v e4m3 with per-head descales, bf16 out.
+# attention_backend: fa4     # sdpa (default, exact) | fa4
+# fa4_fp8_stage1: false
+# fa4_fp8_stage2: false
+
 # --- ComfyUI runtime -------------------------------------------------------
 use_sage_attention: false   # SDPA (default, exact). Sage = opt-in experiment,
                             # needs a manual source build; poor on Blackwell.

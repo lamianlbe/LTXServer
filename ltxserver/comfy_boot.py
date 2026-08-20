@@ -136,7 +136,10 @@ def boot(*, use_sage_attention: bool, disable_smart_memory: bool,
     return handles
 
 
-def setup_environment(cuda_visible_devices: str) -> None:
+def setup_environment(cuda_visible_devices: str, inductor_cache_dir: str = "") -> None:
     """Process env staged BEFORE boot() (and therefore before torch)."""
     if cuda_visible_devices:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+    if inductor_cache_dir:
+        # Already-exported env wins (operator override), same as FastVideo.
+        os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(inductor_cache_dir))

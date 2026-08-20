@@ -34,6 +34,18 @@ pip install -r requirements.txt
 # SageAttention is an opt-in experiment only — it runs poorly on Blackwell.
 # If you ever want it: pip install "sageattention @ git+https://github.com/thu-ml/SageAttention@v2.2.0"
 
+echo "== FA4 (flash_attn.cute) — for attention_backend: fa4 =="
+# Pure-Python CuTe DSL package (kernels JIT at first use), pinned to the
+# cutlass-4.5-compatible revision. Needs sm90+ at runtime (H200/B200);
+# fp8 attention additionally needs sm100 (B200). Skippable: SKIP_FA4=1.
+FA4_REV="${FA4_REV:-82d6441eec5d4dfec120153db2c0145ae855a083}"
+if [ "${SKIP_FA4:-0}" != "1" ]; then
+  pip install "flash-attn-4 @ git+https://github.com/Dao-AILab/flash-attention.git@${FA4_REV}#subdirectory=flash_attn/cute" || {
+    echo "WARNING: FA4 install failed; attention_backend: fa4 will not be available"
+    echo "         (attention_backend: sdpa — the default — is unaffected)."
+  }
+fi
+
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 command -v ffmpeg >/dev/null || echo "NOTE: no system ffmpeg — the imageio-ffmpeg bundle will be used"
 echo "OK. Run:  source .venv/bin/activate && python -m ltxserver --config config.yaml"
