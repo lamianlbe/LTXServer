@@ -61,8 +61,11 @@ strength equals `guide_strength`, appended separately otherwise).
 
 ## Fidelity notes
 
-* **Attention**: `use_sage_attention: true` reproduces the reference
-  deployment (`--use-sage-attention`); set false for pytorch SDPA.
+* **Attention**: pytorch SDPA by default — the exact kernel, and the
+  baseline every comparison uses. When A/B-ing against a desktop ComfyUI,
+  launch it WITHOUT `--use-sage-attention` so both sides run SDPA.
+  (`use_sage_attention: true` remains as an opt-in experiment; it needs a
+  manual source build and runs poorly on Blackwell.)
 * The guider (STGGuiderAdvanced), guide injection (LTXPlusBatchAddGuide),
   sampling (euler_ancestral / euler_ancestral_cfg_pp over ManualSigmas),
   upsample, inplace keyframe, crop and decodes are the plugin/core node

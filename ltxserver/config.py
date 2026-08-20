@@ -115,9 +115,12 @@ class ServerConfig:
     warmup_on_start: bool = True
 
     # --- ComfyUI runtime -------------------------------------------------------
-    # SageAttention (int8 QK^T) — the attention backend the reference
-    # deployment runs (`--use-sage-attention`). false = comfy's pytorch SDPA.
-    use_sage_attention: bool = True
+    # Attention backend. Default false = ComfyUI's pytorch SDPA — the
+    # mathematically exact kernel and the baseline all comparisons use.
+    # SageAttention (int8 QK^T) is kept as an opt-in experiment only; it
+    # runs poorly on Blackwell and needs a manual source build
+    # (thu-ml/SageAttention).
+    use_sage_attention: bool = False
     # Keep every model resident on the GPU (comfy's smart offload can shuffle
     # weights between requests; a dedicated serving GPU should not).
     disable_smart_memory: bool = True

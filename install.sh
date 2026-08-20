@@ -30,16 +30,9 @@ fi
 echo "== server requirements =="
 pip install -r requirements.txt
 
-echo "== SageAttention 2.2 (the reference attention backend) =="
-# PyPI only carries sageattention 1.x, whose kernels/semantics differ from
-# the 2.x the reference deployment runs — build 2.2.0 from source (needs an
-# nvcc matching torch's CUDA; compiles for the LOCAL GPU arch, ~5-15 min).
-SAGE_REF="${SAGE_REF:-v2.2.0}"
-pip install "sageattention @ git+https://github.com/thu-ml/SageAttention@${SAGE_REF}" || {
-  echo "WARNING: sageattention build failed. Either build it manually on this"
-  echo "         machine (git clone thu-ml/SageAttention && pip install .) or"
-  echo "         set use_sage_attention: false in the config."
-}
+# Attention runs on pytorch SDPA by default (exact; no extra install).
+# SageAttention is an opt-in experiment only — it runs poorly on Blackwell.
+# If you ever want it: pip install "sageattention @ git+https://github.com/thu-ml/SageAttention@v2.2.0"
 
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 command -v ffmpeg >/dev/null || echo "NOTE: no system ffmpeg — the imageio-ffmpeg bundle will be used"
