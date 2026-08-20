@@ -6,3 +6,8 @@ boto3
 imageio-ffmpeg
 pillow
 numpy
+# ComfyUI-LTXVideo imports a private symbol kornia removed in 0.8.3
+# (pyramid_blending: `from kornia.geometry.transform.pyramid import pad`);
+# its own requirements leave kornia unpinned. Installed after the plugin
+# requirements so this pin wins.
+kornia==0.8.2

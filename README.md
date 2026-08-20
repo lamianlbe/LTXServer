@@ -22,7 +22,7 @@ two merged models), so the server loads pre-merged weights:
 | config key | file | how to get it |
 |---|---|---|
 | `models.checkpoint` | base ckpt with the **stage-1** DiT folded in | `python scripts/merge_stage1_into_base.py --base <base ckpt> --stage1 <stage1 ModelSave export> --output ...` |
-| `models.stage2_transformer` | **stage-2** DiT-only export | ComfyUI `ModelSave` of the stage-2 merge, as-is |
+| `models.stage2_transformer` | **stage-2** DiT-only export **with config metadata** | ComfyUI `ModelSave` of the stage-2 merge, then `python scripts/embed_config_metadata.py --from-file <base ckpt> --file <export> --output ...` (ModelSave drops the `config` metadata comfy's LTX-2.3 detection needs) |
 | `models.text_encoder` | Gemma text encoder | same file the workflow's `LTXAVTextEncoderLoader` uses |
 | `models.latent_upsampler` | x1.5 spatial upscaler | `ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors` |
 
