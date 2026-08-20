@@ -1,0 +1,6 @@
+[submodule "third_party/ComfyUI"]
+	path = third_party/ComfyUI
+	url = https://github.com/comfyanonymous/ComfyUI
+[submodule "custom_nodes_ext/ComfyUI-LTXVideo"]
+	path = custom_nodes_ext/ComfyUI-LTXVideo
+	url = https://github.com/Lightricks/ComfyUI-LTXVideo

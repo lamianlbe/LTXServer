@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+pyyaml
+boto3
+imageio-ffmpeg
+pillow
+numpy

@@ -1,0 +1,67 @@
+# LTXServer configuration. Copy to config.yaml and edit.
+# Recipe defaults reproduce the reference ComfyUI workflow exactly — the
+# knobs below the "recipe overrides" line only need uncommenting when you
+# deliberately deviate from it.
+
+models:
+  # All-in-one base with the STAGE-1 merged DiT folded in
+  # (scripts/merge_stage1_into_base.py output).
+  checkpoint: /models/10Eros_v1-stage1merged.safetensors
+  # Stage-2 DiT-only ComfyUI ModelSave export.
+  stage2_transformer: /models/stage2_00001_.safetensors
+  # Gemma text encoder (the reference runs the heretic nvfp4 file).
+  text_encoder: /models/gemma-3-12b-it-heretic-v2_nvfp4.safetensors
+  # x1.5 spatial upscaler.
+  latent_upsampler: /models/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors
+
+modes:
+  - {width: 832, height: 480, num_frames: 241, fps: 24}
+  # - {width: 480, height: 832, num_frames: 241, fps: 24}
+
+host: 0.0.0.0
+port: 8000
+# One server process per GPU: set a single index here (or via --gpu).
+cuda_visible_devices: ""
+output_dir: ""          # "" = system temp
+log_dir: ""             # "" = stdout only; else requests.jsonl + failed/<id>/
+api_keys: []            # non-empty = X-API-Key / Bearer auth on /v1/*
+max_consecutive_failures: 3
+warmup_on_start: true
+
+# --- ComfyUI runtime -------------------------------------------------------
+use_sage_attention: true    # the reference deployment's attention backend
+disable_smart_memory: true  # keep every model resident on the GPU
+# reserve_vram_gb: 0
+
+# --- recipe overrides (defaults = the reference workflow) ------------------
+# stage1_sigmas: [1.0, 0.99987238, 0.99820748, 0.99001548, 0.96332988,
+#                 0.89394948, 0.744596, 0.47298248, 0.20186216, 0.04708576, 0.0]
+# stage2_sigmas: [0.85, 0.7250, 0.4219, 0.0]
+# negative_prompt: "..."
+# cfg_sigma_list: [1.0, 0.99375, 0.9875, 0.98125, 0.9550, 0.8925, 0.8120,
+#                  0.7150, 0.6030, 0.4824, 0.3618, 0.2412, 0.1206, 0.0]
+# cfg_values_by_sigma: [2, 1.5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+# cfg_star_rescale: true
+# skip_steps_sigma_threshold: 1.0
+# guide_strength: 0.8
+# guide_longer_size: 1536
+# last_frame_strength: 0.8
+# image_crf: 0.0            # LTXVPreprocess crush; the workflow has none
+
+# --- encoding / delivery ----------------------------------------------------
+video_bitrate_kbps: 3000
+x264_preset: medium
+video_codec: libx264
+# extra_video_args: ""
+encode_threads: 0
+max_concurrent_encodes: 2
+lq_blur_radius: 2.0
+lq_bitrate_kbps: 1000
+lq_x264_preset: ultrafast
+# s3:
+#   region: auto
+#   bucket: my-bucket
+#   access_key: ...
+#   secret_key: ...
+#   endpoint_url: ""       # "" = AWS; set for R2/MinIO
+#   prefix: ""

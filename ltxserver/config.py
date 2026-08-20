@@ -1,0 +1,269 @@
+"""Server configuration: YAML -> validated dataclasses.
+
+The recipe knobs default to the reference workflow's values (optimized
+LTX-2.3 all-in-one, corrected guider sigma list), so an empty override
+section reproduces the workflow; the serving knobs mirror the FastVideo
+LTX-2.3 server's config surface so deployments can switch between the two
+backends without relearning the file format.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+# The reference recipe (ComfyUI workflow port). stage1_sigmas is the EASED
+# schedule the sampler runs; the guider's own sigma list keeps its near-1.0
+# entries — they confine cfg 2 to the first three eased steps.
+DEFAULT_STAGE1_SIGMAS = [
+    1.0, 0.99987238, 0.99820748, 0.99001548, 0.96332988, 0.89394948,
+    0.744596, 0.47298248, 0.20186216, 0.04708576, 0.0,
+]
+DEFAULT_STAGE2_SIGMAS = [0.85, 0.7250, 0.4219, 0.0]
+DEFAULT_CFG_SIGMA_LIST = [
+    1.0, 0.99375, 0.9875, 0.98125, 0.9550, 0.8925, 0.8120, 0.7150,
+    0.6030, 0.4824, 0.3618, 0.2412, 0.1206, 0.0,
+]
+DEFAULT_CFG_VALUES = [2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+DEFAULT_NEGATIVE_PROMPT = (
+    "still image, bad quality, subtitles, text, watermark, overlay effects, pc game, "
+    "yelling, console game, video game, cartoon, childish, ugly, text, blur, logo, "
+    "wordmark, static, low quality, noise, white noise, bleep, censoring, censor, "
+    "bleeping, beep, beeping, newscast, interview, podcast, non-english, foreign "
+    "language, russian, chinese, japanese, mutant, horror, 70's, film grain, "
+    "cinematic, comedy, stand-up ")
+DEFAULT_GUIDE_LONGER_SIZE = 1536
+DEFAULT_GUIDE_STRENGTH = 0.8
+DEFAULT_LAST_FRAME_STRENGTH = 0.8
+WARMUP_PROMPT = ("A person slowly turns their head toward the camera and smiles, "
+                 "soft warm light, gentle camera drift.")
+
+
+@dataclass(frozen=True)
+class Mode:
+    """One supported (resolution, frames, fps) combination."""
+    width: int
+    height: int
+    num_frames: int
+    fps: int
+
+    def validate(self) -> None:
+        if self.width % 32 or self.height % 32:
+            raise ValueError(f"mode {self.width}x{self.height}: dims must be divisible by 32 "
+                             "(LTX VAE spatial compression); the x1.5 upscale additionally "
+                             "needs the upscaled dims to stay integral")
+        if (self.num_frames - 1) % 8:
+            raise ValueError(f"mode num_frames={self.num_frames}: must be 8*k+1 "
+                             "(temporal VAE compression)")
+        if self.fps <= 0:
+            raise ValueError(f"mode fps={self.fps}: must be positive")
+
+
+@dataclass
+class ModelPaths:
+    """The four ComfyUI-style safetensors files the recipe loads.
+
+    checkpoint          all-in-one base with the STAGE-1 merged DiT inside
+                        (build with scripts/merge_stage1_into_base.py)
+    stage2_transformer  DiT-only ModelSave export of the stage-2 merge
+    text_encoder        Gemma text-encoder file (e.g. the heretic nvfp4)
+    latent_upsampler    the x1.5 spatial upscaler
+    """
+    checkpoint: str
+    stage2_transformer: str
+    text_encoder: str
+    latent_upsampler: str
+
+    def validate(self) -> None:
+        for name in ("checkpoint", "stage2_transformer", "text_encoder", "latent_upsampler"):
+            path = Path(getattr(self, name))
+            if not path.is_file():
+                raise ValueError(f"models.{name}: not a file: {path}")
+
+
+@dataclass
+class S3Config:
+    region: str
+    bucket: str
+    access_key: str
+    secret_key: str
+    endpoint_url: str = ""
+    prefix: str = ""
+
+    def validate(self) -> None:
+        for field_name in ("region", "bucket", "access_key", "secret_key"):
+            if not getattr(self, field_name):
+                raise ValueError(f"s3.{field_name} is required")
+
+
+@dataclass
+class ServerConfig:
+    models: ModelPaths
+    modes: list[Mode]
+
+    # --- process / serving ---------------------------------------------------
+    cuda_visible_devices: str = ""  # "" = inherit; one server process per GPU
+    host: str = "0.0.0.0"
+    port: int = 8000
+    output_dir: str = ""
+    log_dir: str = ""
+    api_keys: list[str] = field(default_factory=list)
+    max_consecutive_failures: int = 3
+    warmup_on_start: bool = True
+
+    # --- ComfyUI runtime -------------------------------------------------------
+    # SageAttention (int8 QK^T) — the attention backend the reference
+    # deployment runs (`--use-sage-attention`). false = comfy's pytorch SDPA.
+    use_sage_attention: bool = True
+    # Keep every model resident on the GPU (comfy's smart offload can shuffle
+    # weights between requests; a dedicated serving GPU should not).
+    disable_smart_memory: bool = True
+    # Reserved VRAM comfy leaves free (GB); 0 = comfy default.
+    reserve_vram_gb: float = 0.0
+
+    # --- recipe (defaults = the reference workflow) ---------------------------
+    stage1_sigmas: list[float] = field(default_factory=lambda: list(DEFAULT_STAGE1_SIGMAS))
+    stage2_sigmas: list[float] = field(default_factory=lambda: list(DEFAULT_STAGE2_SIGMAS))
+    negative_prompt: str = DEFAULT_NEGATIVE_PROMPT
+    # STGGuiderAdvanced (stage 1). The sigma->params mapping is a lookup:
+    # smallest listed sigma still >= the sampler's current sigma.
+    cfg_sigma_list: list[float] = field(default_factory=lambda: list(DEFAULT_CFG_SIGMA_LIST))
+    cfg_values_by_sigma: list[float] = field(default_factory=lambda: list(DEFAULT_CFG_VALUES))
+    cfg_star_rescale: bool = True
+    skip_steps_sigma_threshold: float = 1.0
+    # STG stays numerically inert in the reference workflow: the scale values
+    # mirror the cfg list but every step's skip-layer list is [9999], which
+    # names no real block, so the perturbed pass equals the plain pass.
+    stg_scale_values: list[float] | None = None   # None = mirror cfg_values_by_sigma
+    stg_rescale_values: list[float] | None = None  # None = all 1.0
+    stg_layers_indices: str = ""                   # "" = "[9999]" per entry
+    apg_cfg_scale: float = 1.0
+    apg_eta: float = 1.0
+    apg_norm_threshold: float = 1.0
+    # Guide (first/last frame) conditioning.
+    guide_strength: float = DEFAULT_GUIDE_STRENGTH
+    guide_longer_size: int = DEFAULT_GUIDE_LONGER_SIZE
+    last_frame_strength: float = DEFAULT_LAST_FRAME_STRENGTH
+    # LTXVPreprocess "motion strength" H.264 crush of the guide images.
+    # The reference workflow has no preprocess node, so 0 (off) is parity.
+    image_crf: float = 0.0
+
+    # --- encoding / delivery (identical to the FastVideo server) -------------
+    video_bitrate_kbps: int = 3000
+    x264_preset: str = "medium"
+    video_codec: str = "libx264"
+    extra_video_args: str = ""
+    encode_threads: int = 0
+    max_concurrent_encodes: int = 2
+    lq_blur_radius: float = 2.0
+    lq_bitrate_kbps: int = 1000
+    lq_x264_preset: str = "ultrafast"
+    s3: S3Config | None = None
+
+    # ------------------------------------------------------------------
+    def stage1_steps(self) -> int:
+        return len(self.stage1_sigmas) - 1
+
+    def resolved_stg_scale_values(self) -> list[float]:
+        return list(self.stg_scale_values) if self.stg_scale_values else list(self.cfg_values_by_sigma)
+
+    def resolved_stg_rescale_values(self) -> list[float]:
+        return (list(self.stg_rescale_values) if self.stg_rescale_values
+                else [1.0] * len(self.cfg_values_by_sigma))
+
+    def resolved_stg_layers_indices(self) -> str:
+        if self.stg_layers_indices.strip():
+            return self.stg_layers_indices
+        return ", ".join(["[9999]"] * len(self.cfg_sigma_list))
+
+
+def _validate_sigmas(name: str, sigmas: list[float]) -> None:
+    if len(sigmas) < 2:
+        raise ValueError(f"{name} needs at least two entries")
+    if any(b >= a for a, b in zip(sigmas, sigmas[1:])):
+        raise ValueError(f"{name} must be strictly decreasing, got {sigmas}")
+    if not math.isclose(sigmas[-1], 0.0, abs_tol=1e-9):
+        raise ValueError(f"{name} must end at 0.0, got {sigmas[-1]}")
+    if sigmas[0] > 1.0:
+        raise ValueError(f"{name} entries must be <= 1.0, got {sigmas[0]}")
+
+
+def validate_config(cfg: ServerConfig, source: str = "config") -> None:
+    cfg.models.validate()
+    if not cfg.modes:
+        raise ValueError(f"{source}: 'modes' must list at least one combination")
+    for mode in cfg.modes:
+        mode.validate()
+    _validate_sigmas("stage1_sigmas", cfg.stage1_sigmas)
+    _validate_sigmas("stage2_sigmas", cfg.stage2_sigmas)
+    sig = cfg.cfg_sigma_list
+    if any(b > a for a, b in zip(sig, sig[1:])):
+        raise ValueError(f"{source}: cfg_sigma_list must be non-increasing, got {sig}")
+    if len(cfg.cfg_values_by_sigma) < len(sig) - 1:
+        raise ValueError(f"{source}: cfg_values_by_sigma needs at least len(cfg_sigma_list) - 1 "
+                         f"entries ({len(sig) - 1}), got {len(cfg.cfg_values_by_sigma)}")
+    if any(v < 1.0 for v in cfg.cfg_values_by_sigma):
+        raise ValueError(f"{source}: cfg_values_by_sigma entries must be >= 1.0")
+    if not 0.0 < cfg.guide_strength <= 1.0:
+        raise ValueError(f"{source}: guide_strength must be in (0, 1], got {cfg.guide_strength}")
+    if cfg.guide_longer_size < 64:
+        raise ValueError(f"{source}: guide_longer_size must be >= 64")
+    if cfg.image_crf < 0:
+        raise ValueError(f"{source}: image_crf must be >= 0")
+    if any(not isinstance(k, str) or not k.strip() for k in cfg.api_keys):
+        raise ValueError(f"{source}: api_keys entries must be non-empty strings")
+    cvd = cfg.cuda_visible_devices
+    if cvd and not all(p.strip().isdigit() for p in cvd.split(",")):
+        raise ValueError(f"{source}: cuda_visible_devices must be comma-separated GPU indices")
+    n_stg = len(cfg.resolved_stg_scale_values())
+    if n_stg < len(sig) - 1:
+        raise ValueError(f"{source}: stg_scale_values needs at least {len(sig) - 1} entries")
+
+
+def load_config(path: str | Path) -> ServerConfig:
+    raw = yaml.safe_load(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a YAML mapping at the top level")
+    models_raw = raw.pop("models", None)
+    if not isinstance(models_raw, dict):
+        raise ValueError(f"{path}: 'models' must be a mapping with checkpoint / "
+                         "stage2_transformer / text_encoder / latent_upsampler")
+    modes_raw = raw.pop("modes", None)
+    if not modes_raw:
+        raise ValueError(f"{path}: 'modes' must list at least one "
+                         "{width, height, num_frames, fps} combination")
+    s3_raw = raw.pop("s3", None)
+    s3_cfg = None
+    if s3_raw is not None:
+        if not isinstance(s3_raw, dict):
+            raise ValueError(f"{path}: 's3' must be a mapping")
+        s3_cfg = S3Config(**s3_raw)
+        s3_cfg.validate()
+    known = {f for f in ServerConfig.__dataclass_fields__ if f not in ("models", "modes", "s3")}
+    unknown = set(raw) - known
+    if unknown:
+        raise ValueError(f"{path}: unknown config keys {sorted(unknown)}")
+    cfg = ServerConfig(models=ModelPaths(**models_raw),
+                       modes=[Mode(**m) for m in modes_raw],
+                       s3=s3_cfg,
+                       **raw)
+    validate_config(cfg, source=str(path))
+    return cfg
+
+
+def match_mode(modes: list[Mode], width: int, height: int, num_frames: int,
+               fps: int) -> tuple[Mode, bool]:
+    """Exact match, else the closest resolution (aspect-aware log distance);
+    frames/fps break ties."""
+    for mode in modes:
+        if (mode.width, mode.height, mode.num_frames, mode.fps) == (width, height, num_frames, fps):
+            return mode, True
+
+    def distance(mode: Mode) -> tuple[float, int, int]:
+        res = (math.log(width / mode.width) ** 2 + math.log(height / mode.height) ** 2)
+        return (res, abs(num_frames - mode.num_frames), abs(fps - mode.fps))
+
+    return min(modes, key=distance), False
