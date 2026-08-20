@@ -33,9 +33,10 @@ per-layer mixed-precision profile.
 ## Install & run
 
 ```bash
-./install.sh                         # submodules + venv + torch cu130 + deps + sage
+# activate YOUR prepared venv/conda first — install.sh installs into the
+# current environment (torch is skipped when already present)
+./install.sh                         # submodules + deps + FA4 pin
 cp config.example.yaml config.yaml   # edit model paths + modes
-source .venv/bin/activate
 python -m ltxserver --config config.yaml            # GPU from config
 python -m ltxserver --config config.yaml --gpu 1 --port 8001   # per-GPU instance
 ```
