@@ -128,9 +128,19 @@ class LtxRecipe:
         (audio_vae,) = call_node(handles.nodes_lt_audio.LTXVAudioVAELoader,
                                  ckpt_name=names.checkpoints)
         upscale_model = None
+        self.upsampler_scale = 1.0
         if cfg.stage2_enabled:
             (upscale_model,) = call_node(handles.nodes_hunyuan.LatentUpscaleModelLoader,
                                          model_name=names.latent_upscale_models)
+            inner = getattr(upscale_model, "model", upscale_model)
+            self.upsampler_scale = float(getattr(inner, "spatial_scale", 0.0) or 0.0)
+            if self.upsampler_scale <= 1.0:
+                raise RuntimeError("could not read spatial_scale from the latent upsampler "
+                                   f"({names.latent_upscale_models}) — is it an LTX spatial upscaler?")
+            logger.info("latent upsampler: x%s — modes are FINAL resolutions, stage 1 renders "
+                        "at 1/%s of the mode", self.upsampler_scale, self.upsampler_scale)
+            for mode in cfg.modes:
+                self._stage1_dims(mode)  # validates divisibility, raises with guidance
         self.model_s1, self.model_s2 = model_s1, model_s2
         self.clip, self.vae, self.audio_vae = clip, vae, audio_vae
         self.upscale_model = upscale_model
@@ -141,6 +151,26 @@ class LtxRecipe:
         logger.info("models loaded in %.1fs", time.perf_counter() - t0)
 
     # ------------------------------------------------------------------
+    def _stage1_dims(self, mode: Mode) -> tuple[int, int]:
+        """Stage-1 render size for a FINAL-resolution mode.
+
+        Matches the FastVideo server: config modes are the post-upscale
+        output resolution; stage 1 runs at mode/scale. With stage 2
+        disabled the mode IS the render resolution (also FastVideo's
+        semantics for its stage-1-only switch).
+        """
+        if not self.cfg.stage2_enabled:
+            return mode.width, mode.height
+        s = self.upsampler_scale
+        w, h = mode.width / s, mode.height / s
+        if w != int(w) or h != int(h) or int(w) % 32 or int(h) % 32:
+            hint = 96 if abs(s - 1.5) < 1e-6 else 64 if abs(s - 2.0) < 1e-6 else f"{32 * s:g}"
+            raise ValueError(f"mode {mode.width}x{mode.height}: stage 1 would render at "
+                             f"{w:g}x{h:g}, which must be integral and divisible by 32 for the "
+                             f"x{s:g} upsampler — use final dims divisible by {hint} "
+                             f"(e.g. 1344x768 for x1.5)")
+        return int(w), int(h)
+
     def generate(self, request: GenerationRequest, mode: Mode) -> dict:
         """One full two-stage generation. Returns raw frames + audio."""
         import torch
@@ -158,9 +188,10 @@ class LtxRecipe:
             pos, neg = call_node(lt.LTXVConditioning, positive=pos, negative=neg,
                                  frame_rate=float(mode.fps))
 
-            # --- empty AV latents --------------------------------------------
-            (lat_video,) = call_node(lt.EmptyLTXVLatentVideo, width=mode.width,
-                                     height=mode.height, length=mode.num_frames,
+            # --- empty AV latents (stage-1 render size; mode = FINAL size) ---
+            s1_width, s1_height = self._stage1_dims(mode)
+            (lat_video,) = call_node(lt.EmptyLTXVLatentVideo, width=s1_width,
+                                     height=s1_height, length=mode.num_frames,
                                      batch_size=1)
             (lat_audio,) = call_node(lta.LTXVEmptyLatentAudio,
                                      frames_number=mode.num_frames,
@@ -181,6 +212,8 @@ class LtxRecipe:
             # are exactly chained LTXVAddGuide nodes (append semantics).
             guide_batches: list[tuple[object, str, float]] = []
             strengths_note = f"strength={cfg.guide_strength}"
+            if cfg.stage2_enabled:
+                strengths_note += f", stage1 {s1_width}x{s1_height}"
             if request.last_frame_path:
                 guide_last = load_guide_image(request.last_frame_path, cfg.guide_longer_size)
                 if image_crf and image_crf > 0:

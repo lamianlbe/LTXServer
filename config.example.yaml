@@ -14,9 +14,14 @@ models:
   # x1.5 spatial upscaler.
   latent_upsampler: /models/ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors
 
+# FINAL (post-upscale) output resolutions — identical semantics to the
+# FastVideo server config. Stage 1 renders at mode/upsampler-scale, so for
+# the x1.5 upscaler use dims divisible by 96 (1344x768 -> stage 1 896x512).
+# Requests that don't match a mode are served with the CLOSEST one (no
+# runtime recompile); the response headers report the served mode.
 modes:
-  - {width: 832, height: 480, num_frames: 241, fps: 24}
-  # - {width: 480, height: 832, num_frames: 241, fps: 24}
+  - {width: 1344, height: 768, num_frames: 241, fps: 24}
+  # - {width: 768, height: 1344, num_frames: 241, fps: 24}
 
 host: 0.0.0.0
 port: 8000

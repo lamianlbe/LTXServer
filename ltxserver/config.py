@@ -44,7 +44,14 @@ WARMUP_PROMPT = ("A person slowly turns their head toward the camera and smiles,
 
 @dataclass(frozen=True)
 class Mode:
-    """One supported (resolution, frames, fps) combination."""
+    """One supported (resolution, frames, fps) combination.
+
+    width/height are the FINAL (post-upscale) output resolution, same as the
+    FastVideo server's config: stage 1 renders at mode/upsampler-scale
+    (validated against the loaded upsampler at startup — for the x1.5
+    upscaler use dims divisible by 96, e.g. 1344x768 -> stage 1 896x512).
+    With stage2_enabled: false the mode is the direct render resolution.
+    """
     width: int
     height: int
     num_frames: int
