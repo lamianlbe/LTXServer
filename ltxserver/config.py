@@ -74,8 +74,12 @@ class ModelPaths:
     """The four ComfyUI-style safetensors files the recipe loads.
 
     checkpoint          all-in-one base with the STAGE-1 merged DiT inside
-                        (build with scripts/merge_stage1_into_base.py)
-    stage2_transformer  DiT-only ModelSave export of the stage-2 merge
+                        (build with scripts/merge_dit_into_checkpoint.py)
+    stage2_transformer  the STAGE-2 DiT — either a full checkpoint (same
+                        script, recommended: loads through comfy's normal
+                        checkpoint path) or a DiT-only ModelSave export
+                        with grafted config metadata (UNETLoader path);
+                        the recipe sniffs the header and picks the loader
     text_encoder        Gemma text-encoder file (e.g. the heretic nvfp4)
     latent_upsampler    the x1.5 spatial upscaler
     """

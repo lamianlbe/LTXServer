@@ -11,7 +11,7 @@ third_party/ComfyUI              ComfyUI v0.33.2 (submodule, unmodified)
 custom_nodes_ext/ComfyUI-LTXVideo  Lightricks plugin (submodule, unmodified)
 custom_nodes_ext/ltxplus         vendored LTXPlusBatchAddGuide (@26ddd98)
 ltxserver/                       config / comfy bootstrap / recipe / server
-scripts/merge_stage1_into_base.py  model prep (see below)
+scripts/merge_dit_into_checkpoint.py  model prep (see below)
 ```
 
 ## Model preparation — 4 files
@@ -21,8 +21,8 @@ two merged models), so the server loads pre-merged weights:
 
 | config key | file | how to get it |
 |---|---|---|
-| `models.checkpoint` | base ckpt with the **stage-1** DiT folded in | `python scripts/merge_stage1_into_base.py --base <base ckpt> --stage1 <stage1 ModelSave export> --output ...` |
-| `models.stage2_transformer` | **stage-2** DiT-only export **with config metadata** | ComfyUI `ModelSave` of the stage-2 merge, then `python scripts/embed_config_metadata.py --from-file <base ckpt> --file <export> --output ...` (ModelSave drops the `config` metadata comfy's LTX-2.3 detection needs) |
+| `models.checkpoint` | base ckpt with the **stage-1** DiT folded in | `python scripts/merge_dit_into_checkpoint.py --base <base ckpt> --dit <stage1 ModelSave export> --output ...` |
+| `models.stage2_transformer` | full ckpt with the **stage-2** DiT folded in (recommended) | same script: `python scripts/merge_dit_into_checkpoint.py --base <stage-1 merged ckpt> --dit <stage2 ModelSave export> --output ...` — loads through comfy's normal checkpoint path. Alternative (auto-detected by header): a DiT-only export with grafted `config` metadata via `scripts/embed_config_metadata.py`, loaded by UNETLoader |
 | `models.text_encoder` | Gemma text encoder | same file the workflow's `LTXAVTextEncoderLoader` uses |
 | `models.latent_upsampler` | x1.5 spatial upscaler | `ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors` |
 

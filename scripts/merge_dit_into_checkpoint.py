@@ -1,29 +1,41 @@
 #!/usr/bin/env python3
-"""Fold the stage-1 merged DiT back into the all-in-one base checkpoint.
+"""Build a FULL checkpoint from a full base + a DiT-only ModelSave export.
+
+Takes any complete checkpoint (``--base``) and replaces its
+``model.diffusion_model.*`` payload with a ComfyUI ``ModelSave`` export
+(``--dit``). Everything else — VAE, audio VAE, vocoder, text-embedding
+connectors, the safetensors ``config``/``model_version`` metadata and all
+quantization sidecars — stays byte-identical to the base. The output loads
+through comfy's normal checkpoint path (CheckpointLoaderSimple), no
+metadata grafting or UNETLoader needed.
 
 The reference workflow builds two models at load time by stacking LoRAs on
-the base checkpoint. This server loads pre-merged weights instead, from
-exactly two files:
+one base checkpoint; this server loads pre-merged weights instead. Run
+this script once per stage:
 
-  * the BASE checkpoint with its ``model.diffusion_model.*`` payload
-    REPLACED by the stage-1 ComfyUI ``ModelSave`` export (this script's
-    output) — VAE, audio VAE, vocoder, text-embedding connectors and all
-    quantization sidecars stay byte-identical to the base;
-  * the stage-2 ``ModelSave`` export, loaded standalone via UNETLoader.
+    # stage 1: fold the stage-1 merge into the original base
+    python scripts/merge_dit_into_checkpoint.py \\
+        --base 10Eros_v1-fp8mixed_learned.safetensors \\
+        --dit stage1_00001_.safetensors \\
+        --output 10Eros_v1-stage1merged.safetensors
+
+    # stage 2: same operation — the stage-1 merged file works as the base
+    # (its non-DiT payload is byte-identical to the original base's)
+    python scripts/merge_dit_into_checkpoint.py \\
+        --base 10Eros_v1-stage1merged.safetensors \\
+        --dit 10Eros_v1-stage2.safetensors \\
+        --output 10Eros_v1-stage2merged.safetensors
 
 Everything is copied as raw bytes — fp8 payloads, ``.weight_scale`` and
 ``.comfy_quant`` sidecars ride along untouched, so the merged file keeps
-the exact per-layer mixed-precision profile ComfyUI saved.
+the exact per-layer mixed-precision profile ComfyUI saved. A ``--dit``
+file that already carries grafted metadata (embed_config_metadata.py) is
+fine: only its tensors are read, the base's metadata wins.
 
 Key naming: ``ModelSave`` writes comfy's INTERNAL module names, which may
 differ from the base checkpoint's on-disk names for the gated-attention
 weight (``to_gate_logits`` vs ``to_gate_compress``). The base's naming
 wins — each base DiT key is sourced from the export under either spelling.
-
-    python scripts/merge_stage1_into_base.py \\
-        --base 10Eros_v1-fp8mixed_learned.safetensors \\
-        --stage1 stage1_00001_.safetensors \\
-        --output 10Eros_v1-stage1merged.safetensors
 
 Streaming: peak RAM is one tensor.
 """
@@ -71,12 +83,13 @@ def export_key_for(base_key: str, export_header: dict) -> str | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", required=True, help="original all-in-one checkpoint")
-    ap.add_argument("--stage1", required=True, help="ComfyUI ModelSave export of the stage-1 merge")
+    ap.add_argument("--base", required=True, help="complete checkpoint donating everything but the DiT")
+    ap.add_argument("--dit", "--stage1", dest="dit", required=True,
+                    help="ComfyUI ModelSave export whose DiT tensors replace the base's")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
-    base_path, export_path, out_path = Path(args.base), Path(args.stage1), Path(args.output)
+    base_path, export_path, out_path = Path(args.base), Path(args.dit), Path(args.output)
     base_header, base_meta = read_header(base_path)
     export_header, _ = read_header(export_path)
 
@@ -116,12 +129,15 @@ def main() -> None:
         offset += size
 
     meta = dict(base_meta)
-    meta["ltxserver_merge"] = json.dumps({"base": base_path.name, "stage1": export_path.name})
+    provenance = {"base": base_path.name, "dit": export_path.name}
+    if "ltxserver_merge" in meta:  # base was itself a merge — keep the chain
+        provenance["parent"] = json.loads(meta["ltxserver_merge"])
+    meta["ltxserver_merge"] = json.dumps(provenance)
     blob = json.dumps({"__metadata__": meta, **out_header}, separators=(",", ":")).encode()
     blob += b" " * ((8 - len(blob) % 8) % 8)
 
     print(f"base    : {base_path}  ({len(base_header)} tensors)")
-    print(f"stage1  : {export_path}  ({len(export_header)} tensors)")
+    print(f"dit     : {export_path}  ({len(export_header)} tensors)")
     print(f"output  : {out_path}  ({replaced} DiT tensors replaced [{fp8} fp8], "
           f"{kept} non-DiT kept verbatim, {offset / 1e9:.1f} GB)")
 

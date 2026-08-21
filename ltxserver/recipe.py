@@ -60,6 +60,22 @@ def _csv(values) -> str:
     return ", ".join(f"{float(v):g}" for v in values)
 
 
+def _is_full_checkpoint(path: str | Path) -> bool:
+    """True if the safetensors file carries more than the DiT (has VAE keys).
+
+    Header-only sniff (no tensor data read). Distinguishes a complete
+    checkpoint (merge_dit_into_checkpoint.py output — loadable through
+    comfy's normal checkpoint path) from a DiT-only ModelSave export
+    (needs UNETLoader + grafted config metadata).
+    """
+    import json
+    import struct
+    with Path(path).open("rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    return any(key.startswith("vae.") for key in header)
+
+
 def load_image_tensor(path: str | Path):
     """PIL -> [1, H, W, C] float32 in [0, 1] — the same pixel math as
     ComfyUI's LoadImage (EXIF transpose, RGB, /255)."""
@@ -114,9 +130,21 @@ class LtxRecipe:
                                               ckpt_name=names.checkpoints)[:3]
         model_s2 = None
         if cfg.stage2_enabled:
-            logger.info("loading stage-2 transformer: %s", names.diffusion_models)
-            (model_s2,) = call_node(nodes.UNETLoader, unet_name=names.diffusion_models,
-                                    weight_dtype="default")
+            stage2_path = Path(cfg.models.stage2_transformer)
+            if _is_full_checkpoint(stage2_path):
+                # Same detection/build path as CheckpointLoaderSimple (stage 1
+                # uses it too), minus the duplicate VAE/CLIP construction.
+                logger.info("loading stage-2 model (full checkpoint path): %s", stage2_path.name)
+                import comfy.sd
+                import folder_paths
+                model_s2 = comfy.sd.load_checkpoint_guess_config_model_only(
+                    str(stage2_path),
+                    embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            else:
+                logger.info("loading stage-2 transformer (DiT-only export, UNETLoader): %s",
+                            names.diffusion_models)
+                (model_s2,) = call_node(nodes.UNETLoader, unet_name=names.diffusion_models,
+                                        weight_dtype="default")
         else:
             logger.info("stage 2 disabled: stage-2 transformer and upsampler are not loaded")
         logger.info("loading text encoder: %s (+ connectors from the checkpoint)",

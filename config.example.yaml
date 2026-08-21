@@ -5,10 +5,11 @@
 
 models:
   # All-in-one base with the STAGE-1 merged DiT folded in
-  # (scripts/merge_stage1_into_base.py output).
+  # (scripts/merge_dit_into_checkpoint.py output).
   checkpoint: /models/10Eros_v1-stage1merged.safetensors
-  # Stage-2 DiT-only ComfyUI ModelSave export.
-  stage2_transformer: /models/stage2_00001_.safetensors
+  # Stage-2 DiT: a FULL checkpoint (same merge script, recommended) or a
+  # DiT-only ModelSave export with grafted config metadata — auto-detected.
+  stage2_transformer: /models/10Eros_v1-stage2merged.safetensors
   # Gemma text encoder (the reference runs the heretic nvfp4 file).
   text_encoder: /models/gemma-3-12b-it-heretic-v2_nvfp4.safetensors
   # x1.5 spatial upscaler.
