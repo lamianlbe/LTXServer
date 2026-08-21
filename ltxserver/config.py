@@ -137,6 +137,12 @@ class ServerConfig:
     # serving; set false only on VRAM-starved debug boxes (comfy's smart
     # memory then offloads as needed).
     highvram: bool = True
+    # comfy --gpu-only: text encoders live ON the GPU and intermediate
+    # results stay there. Without it every request reloads the 13GB text
+    # encoder from RAM (~2s) and VAE-decoded frames round-trip through CPU
+    # fp32 (seconds of copy + CPU postprocessing). Set false together with
+    # highvram: false on VRAM-starved debug boxes.
+    gpu_only: bool = True
     # Reserved VRAM comfy leaves free (GB); 0 = comfy default.
     reserve_vram_gb: float = 0.0
 

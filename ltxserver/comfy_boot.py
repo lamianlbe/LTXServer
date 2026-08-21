@@ -76,7 +76,7 @@ def find_node_class(nodes_module: ModuleType, name: str) -> Any:
                    f"(have: {[k for k in mapping if 'LTX' in k or 'STG' in k][:20]})")
 
 
-def boot(*, use_sage_attention: bool, highvram: bool,
+def boot(*, use_sage_attention: bool, highvram: bool, gpu_only: bool,
          reserve_vram_gb: float, model_files: dict[str, str]) -> ComfyHandles:
     """Initialize embedded ComfyUI and register model/plugin paths.
 
@@ -98,6 +98,13 @@ def boot(*, use_sage_attention: bool, highvram: bool,
     # is the OPPOSITE of resident (it forces aggressive offload); never set it
     # for serving.
     args.highvram = bool(highvram)
+    # --gpu-only additionally puts TEXT ENCODERS on the GPU
+    # (text_encoder_device) and keeps INTERMEDIATE results there
+    # (intermediate_device). Without it comfy reloads the text encoder from
+    # RAM every request (~2s for the 13GB gemma) and ships VAE-decoded
+    # frames to the CPU as fp32 (a 1.4GB copy + CPU-side postprocessing).
+    if gpu_only and hasattr(args, "gpu_only"):
+        args.gpu_only = True
     if reserve_vram_gb and hasattr(args, "reserve_vram"):
         args.reserve_vram = float(reserve_vram_gb)
 
@@ -114,8 +121,9 @@ def boot(*, use_sage_attention: bool, highvram: bool,
 
     import comfy.model_management as model_management
     logger.info("comfy device: %s | sage attention: %s | highvram (models pinned): %s | "
-                "vram state: %s", model_management.get_torch_device(), args.use_sage_attention,
-                args.highvram, model_management.vram_state.name)
+                "gpu_only (TE + intermediates on GPU): %s | vram state: %s",
+                model_management.get_torch_device(), args.use_sage_attention,
+                args.highvram, getattr(args, "gpu_only", False), model_management.vram_state.name)
 
     # -- node registry (needs a PromptServer instance like main.py makes) -----
     import nodes

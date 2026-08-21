@@ -217,3 +217,22 @@ def log_dynamo_counters(tag: str, log=logger.info) -> None:
         "" if not breaks else " — top: " + "; ".join(
             f"{k.strip()[:90]} x{v}" for k, v in
             sorted(counters["graph_break"].items(), key=lambda kv: -kv[1])[:3]))
+
+
+def compile_vae_decode(vae, *, label: str) -> None:
+    """torch.compile the video VAE's decode path.
+
+    The comfy ``VAE`` wrapper calls ``self.first_stage_model.decode(...)``;
+    wrapping that bound method compiles the whole decoder while leaving
+    comfy's tiling/memory fallbacks (which call the same method) intact.
+    Decode shapes are fixed per mode, so warmup covers every graph.
+    """
+    import torch
+
+    model = getattr(vae, "first_stage_model", None)
+    if model is None or not hasattr(model, "decode"):
+        logger.warning("[%s] VAE has no first_stage_model.decode — not compiled", label)
+        return
+    model.decode = torch.compile(model.decode, backend="inductor", mode="default",
+                                 fullgraph=False, dynamic=False)
+    logger.info("[%s] torch.compile attached to the video VAE decode", label)

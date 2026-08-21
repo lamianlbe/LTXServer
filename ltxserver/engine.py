@@ -21,6 +21,7 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     handles = boot(
         use_sage_attention=cfg.use_sage_attention,
         highvram=cfg.highvram,
+        gpu_only=cfg.gpu_only,
         reserve_vram_gb=cfg.reserve_vram_gb,
         model_files={
             "checkpoints": cfg.models.checkpoint,
@@ -46,6 +47,8 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
         for label, patcher, _fp8 in stage_models:
             prepare_model_for_compile(patcher, label)
             compile_model(patcher, scope=cfg.compile_scope, label=label)
+        from .perf import compile_vae_decode
+        compile_vae_decode(recipe.vae, label="vae")
 
     return recipe
 
