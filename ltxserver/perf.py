@@ -126,6 +126,49 @@ def _build_fp8_linear_class():
     return _Fp8ScaledLinear
 
 
+def _build_fp8_dequant_linear_classes():
+    """Weight-only fp8 twins: dequantize the weight, run a plain GEMM.
+
+    comfy runs TEXT ENCODERS this way (activations stay bf16; only the
+    weight is stored fp8), while diffusion models run the fp8 x fp8
+    scaled_mm path — the probe ladder keeps whichever twin matches the
+    real layer bit-for-bit. Two dequant rounding orders exist in the
+    wild, so both variants are offered: multiply in fp32 then cast, or
+    cast the payload first and multiply in the compute dtype.
+    """
+    import torch
+
+    class _DequantBase(torch.nn.Module):
+        def __init__(self, payload, scale, bias, out_dtype):
+            super().__init__()
+            self.register_buffer("weight_fp8", payload.contiguous(), persistent=False)
+            self.register_buffer("weight_scale", scale.detach().to(torch.float32).reshape(()),
+                                 persistent=False)
+            if bias is not None:
+                self.bias = torch.nn.Parameter(bias.detach().clone(), requires_grad=False)
+            else:
+                self.bias = None
+            self.out_dtype = out_dtype
+
+        @property
+        def weight(self):
+            # Type-check compatibility for comfy.ops.linear_input_act (a
+            # plain tensor routes that caller into ``linear(act(x))``).
+            return self.weight_fp8
+
+    class Fp8DequantF32Linear(_DequantBase):
+        def forward(self, x):
+            w = (self.weight_fp8.to(torch.float32) * self.weight_scale).to(x.dtype)
+            return torch.nn.functional.linear(x, w, self.bias)
+
+    class Fp8DequantCastLinear(_DequantBase):
+        def forward(self, x):
+            w = self.weight_fp8.to(x.dtype) * self.weight_scale.to(x.dtype)
+            return torch.nn.functional.linear(x, w, self.bias)
+
+    return (Fp8DequantF32Linear, Fp8DequantCastLinear)
+
+
 def swap_fp8_linears(root_module, label: str) -> int:
     """Swap QuantizedTensor fp8 linears under ``root_module`` for
     compile-friendly twins, in place.
@@ -142,6 +185,7 @@ def swap_fp8_linears(root_module, label: str) -> int:
     cls = _build_fp8_linear_class()
 
     swapped = 0
+    kind_counts: dict[str, int] = {}
     with torch.no_grad():
         for name, module in list(root_module.named_modules()):
             weight = getattr(module, "weight", None)
@@ -154,30 +198,43 @@ def swap_fp8_linears(root_module, label: str) -> int:
             payload, scale = _plain_tensors(weight)
             bias = getattr(module, "bias", None)
             out_dtype = bias.dtype if bias is not None else torch.bfloat16
-            twin = cls(payload, scale, bias, out_dtype).to(payload.device)
 
             probe = torch.randn(2, 16, payload.shape[1], device=payload.device,
                                 dtype=out_dtype) * 3.0
-            # Two probes: the plain forward, and comfy.ops.linear_input_act —
-            # the one external caller that reaches around the module's forward
-            # (the FFN down-projection), which reads .weight first.
             import comfy.ops as comfy_ops
-            for tag, ref, got in (
-                ("forward", module(probe), twin(probe)),
-                ("linear_input_act", comfy_ops.linear_input_act(module, probe, "gelu_tanh"),
-                 comfy_ops.linear_input_act(twin, probe, "gelu_tanh")),
-            ):
-                if not torch.equal(ref, got):
-                    max_diff = (ref.float() - got.float()).abs().max().item()
-                    raise RuntimeError(
-                        f"{label}.{name} [{tag}]: compile-friendly fp8 linear is NOT bit-identical "
-                        f"to the comfy layer it would replace (max diff {max_diff}); refusing to "
-                        "compile. A comfy/comfy_kitchen upgrade likely changed fp8 numerics — re-verify.")
-            comfy.utils.set_attr(root_module, name, twin)
+            ref_fwd = module(probe)
+            ref_act = comfy_ops.linear_input_act(module, probe, "gelu_tanh")
+
+            # comfy picks the compute path per MODEL: diffusion models run
+            # fp8 x fp8 scaled_mm, text encoders dequantize the weight and
+            # run a bf16 GEMM. Offer one twin per known semantics and keep
+            # whichever matches bit-for-bit on BOTH probes (the plain
+            # forward, and comfy.ops.linear_input_act — the FFN
+            # down-projection caller that reads .weight first).
+            dequant_f32_cls, dequant_cast_cls = _build_fp8_dequant_linear_classes()
+            chosen = None
+            diffs = []
+            for kind, twin_cls in (("scaled_mm", cls),
+                                   ("dequant_f32", dequant_f32_cls),
+                                   ("dequant_cast", dequant_cast_cls)):
+                twin = twin_cls(payload, scale, bias, out_dtype).to(payload.device)
+                got_fwd = twin(probe)
+                got_act = comfy_ops.linear_input_act(twin, probe, "gelu_tanh")
+                if torch.equal(ref_fwd, got_fwd) and torch.equal(ref_act, got_act):
+                    chosen = (kind, twin)
+                    break
+                diffs.append((kind, (ref_fwd.float() - got_fwd.float()).abs().max().item()))
+            if chosen is None:
+                raise RuntimeError(
+                    f"{label}.{name}: no compile-friendly fp8 twin matches the comfy layer "
+                    f"bit-for-bit (max forward diffs: {diffs}); refusing to compile. A comfy/"
+                    "comfy_kitchen upgrade likely changed fp8 numerics — re-verify.")
+            kind_counts[chosen[0]] = kind_counts.get(chosen[0], 0) + 1
+            comfy.utils.set_attr(root_module, name, chosen[1])
             swapped += 1
 
-    logger.info("[%s] %d fp8 linear(s) swapped for compile-friendly twins (probe: bit-identical)",
-                label, swapped)
+    logger.info("[%s] %d fp8 linear(s) swapped for compile-friendly twins "
+                "(probe: bit-identical; kinds: %s)", label, swapped, kind_counts or {})
     return swapped
 
 
