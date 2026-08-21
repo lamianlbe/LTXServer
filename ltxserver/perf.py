@@ -27,6 +27,7 @@ notably ``shape_padding = False``, which is load-bearing on Blackwell
 from __future__ import annotations
 
 import logging
+import os
 
 logger = logging.getLogger("ltxserver.perf")
 
@@ -61,9 +62,12 @@ def apply_inductor_settings() -> None:
     inductor.conv_1x1_as_mm = True
     inductor.coordinate_descent_tuning = True
     inductor.coordinate_descent_check_all_directions = True
-    # Print the failed guard whenever a compiled region re-traces: steady-state
-    # recompiles are always bugs here, and the reason is otherwise invisible.
-    torch._logging.set_logs(recompiles=True)
+    # Verbose per-recompile guard dumps are OFF by default — warmup compiles
+    # hundreds of legitimate shape variants and the spam drowns the log. The
+    # per-generation "dynamo re-traced" warning (recipe.py) stays on as the
+    # tripwire; when it fires, set LTXSERVER_LOG_RECOMPILES=1 to see WHY.
+    if os.environ.get("LTXSERVER_LOG_RECOMPILES", "") not in ("", "0"):
+        torch._logging.set_logs(recompiles=True)
     inductor.epilogue_fusion = False
     ensure_dynamo_limits()
 
