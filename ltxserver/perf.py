@@ -233,6 +233,10 @@ def compile_vae_decode(vae, *, label: str) -> None:
     if model is None or not hasattr(model, "decode"):
         logger.warning("[%s] VAE has no first_stage_model.decode — not compiled", label)
         return
+    # The causal decoder runs variable-length temporal chunks (15/16/17
+    # frames) through python-index block dispatch: static shapes thrash the
+    # recompile limit, so compile with dynamic shapes and a bigger budget.
+    torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 128)
     model.decode = torch.compile(model.decode, backend="inductor", mode="default",
-                                 fullgraph=False, dynamic=False)
-    logger.info("[%s] torch.compile attached to the video VAE decode", label)
+                                 fullgraph=False, dynamic=True)
+    logger.info("[%s] torch.compile attached to the video VAE decode (dynamic shapes)", label)

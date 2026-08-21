@@ -40,6 +40,8 @@ warmup_on_start: true
 # startup (probe-verified); compile: false runs stock comfy modules.
 # compile: true
 # compile_scope: blocks      # blocks (default; outer guide bookkeeping stays eager) | model
+# compile_vae: false          # VAE decode compile is experimental (variable
+#                             # temporal chunks thrash dynamo); leave off
 # inductor_cache_dir: /workspace/inductor_cache
 # FA4 attention (flash_attn.cute; sm90+ — H200/B200). Masked segments (the
 # stage-1 guide bias) always stay on SDPA. fp8 attention per stage is

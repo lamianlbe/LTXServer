@@ -47,8 +47,9 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
         for label, patcher, _fp8 in stage_models:
             prepare_model_for_compile(patcher, label)
             compile_model(patcher, scope=cfg.compile_scope, label=label)
-        from .perf import compile_vae_decode
-        compile_vae_decode(recipe.vae, label="vae")
+        if cfg.compile_vae:
+            from .perf import compile_vae_decode
+            compile_vae_decode(recipe.vae, label="vae")
 
     return recipe
 

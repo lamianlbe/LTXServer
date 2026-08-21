@@ -160,6 +160,12 @@ class ServerConfig:
     # (observed breaking whole-model graphs on stage 1). model = one graph
     # per DiT, only sensible for guide-free recipes.
     compile_scope: str = "blocks"  # blocks | model
+    # The causal video VAE decodes in VARIABLE-length temporal chunks and
+    # dispatches blocks by python index, so whole-decode compilation thrashes
+    # dynamo (recompile-limit hits on chunk sizes 15/16/17, untraceable
+    # thread-ident calls) and can end up slower than eager. Off by default;
+    # opt-in compiles with dynamic shapes and a raised recompile budget.
+    compile_vae: bool = False
     inductor_cache_dir: str = ""  # "" = torch default (NOT persistent across restarts)
     # Attention backend for BOTH DiTs. sdpa = comfy's pytorch attention (the
     # exact baseline). fa4 = flash_attn.cute (Hopper/Blackwell datacenter
