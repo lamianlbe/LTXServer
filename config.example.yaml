@@ -77,6 +77,9 @@ highvram: true              # pin all models in GPU memory (required for serving
 # stg_scale_values: []
 # skip_steps_sigma_threshold: 1.0
 # guide_strength: 0.8
+# guide_attention_bias: false   # skip the guide attention mask: stage-1 attn1
+#                               # becomes one unmasked call (FA4-eligible);
+#                               # noise semantics keep guide_strength
 # guide_longer_size: 1536
 # last_frame_strength: 0.8
 # image_crf: 0.0            # LTXVPreprocess crush; the workflow has none

@@ -101,6 +101,19 @@ class LTXPlusBatchAddGuide:
                                    "LTXVAddGuide.strength).",
                     },
                 ),
+                "attention_bias": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Write the guide's strength into its "
+                                   "attention entry (log-strength content<->guide "
+                                   "attenuation). False records strength 1.0 "
+                                   "there instead: the model skips the guide "
+                                   "attention mask entirely (single unmasked "
+                                   "self-attention call) while the keyframe's "
+                                   "noise-level semantics keep the real strength.",
+                    },
+                ),
             },
         }
 
@@ -115,7 +128,7 @@ class LTXPlusBatchAddGuide:
     )
 
     def execute(self, positive, negative, vae, latent, images, frame_indices,
-                strength=0.8):
+                strength=0.8, attention_bias=True):
         indices = _parse_frame_indices(frame_indices)
         n_images = int(images.shape[0]) if images is not None else 0
         n = min(n_images, len(indices))
@@ -190,9 +203,13 @@ class LTXPlusBatchAddGuide:
             # apply per-keyframe attention control during sampling.
             pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
             guide_latent_shape = list(t.shape[2:])
+            # strength 1.0 in the ATTENTION entry hits the model's
+            # needs_mask early-out (_build_guide_self_attention_mask returns
+            # None): self-attention runs as ONE unmasked call, FA4-eligible.
+            # The keyframe's noise semantics above keep the real strength.
             positive, negative = _lt_nodes._append_guide_attention_entry(
                 positive, negative, pre_filter_count, guide_latent_shape,
-                strength=strength,
+                strength=strength if attention_bias else 1.0,
             )
 
             logger.info(

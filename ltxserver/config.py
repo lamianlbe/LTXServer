@@ -196,6 +196,14 @@ class ServerConfig:
     # not loaded when this is false.
     stage2_enabled: bool = True
     # Guide (first/last frame) conditioning.
+    # guide_attention_bias: the workflow's log(strength) content<->guide
+    # self-attention attenuation. It forces stage-1 attn1 onto a segmented
+    # MASKED sdpa path in every block (no FA4 there) — the reference recipe
+    # pays this; false skips the mask entirely (single unmasked call,
+    # FA4-eligible) while the guide's noise-level semantics keep
+    # guide_strength — the same trade FastVideo's guide_attention_bias knob
+    # makes, in the same direction.
+    guide_attention_bias: bool = True
     guide_strength: float = DEFAULT_GUIDE_STRENGTH
     guide_longer_size: int = DEFAULT_GUIDE_LONGER_SIZE
     last_frame_strength: float = DEFAULT_LAST_FRAME_STRENGTH

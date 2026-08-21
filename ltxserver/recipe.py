@@ -234,7 +234,8 @@ class LtxRecipe:
                                                 negative=neg, vae=self.vae, latent=lat_video,
                                                 images=batch_images,
                                                 frame_indices=frame_indices,
-                                                strength=strength)
+                                                strength=strength,
+                                                attention_bias=cfg.guide_attention_bias)
 
             (av_latent,) = call_node(lt.LTXVConcatAVLatent, video_latent=lat_video,
                                      audio_latent=lat_audio)
