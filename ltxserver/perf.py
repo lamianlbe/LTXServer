@@ -327,8 +327,13 @@ def _build_singleshot_conv_class():
         def __init__(self, orig):
             super().__init__()
             self.conv = orig.conv
-            self.time_kernel_size = orig.time_kernel_size
+            # Mirror the ORIGINAL's full public attribute surface — outer
+            # comfy code introspects these (e.g. the encoder's chunk-size
+            # estimate reads conv_in.in_channels / .out_channels).
+            self.in_channels = orig.in_channels
             self.out_channels = orig.out_channels
+            self.time_kernel_size = orig.time_kernel_size
+            self.time_stride = orig.time_stride
 
         def forward(self, x, causal: bool = True):
             import torch as _t
