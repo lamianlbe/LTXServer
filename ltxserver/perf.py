@@ -193,21 +193,46 @@ def _plain_tensors(weight):
 
 
 def compile_model(model_patcher, *, scope: str, label: str) -> None:
-    """Attach comfy's official torch.compile wrapper to a ModelPatcher."""
-    from comfy_api.torch_helpers import set_torch_compile_wrapper
+    """torch.compile a DiT, FastVideo-style.
+
+    ``blocks`` (default) patches each transformer block's BOUND ``forward``
+    in place. Every block — across BOTH stage models — shares one forward
+    code object, so dynamo traces a single block per served shape and
+    reuses the entry everywhere; per-shape warmup covers one block's trace
+    instead of a fully-inlined 48-block model (the difference between
+    ~minutes and ~tens of minutes, measured on FastVideo). The in-place
+    patch survives ModelPatcher clones (guiders clone the patcher but share
+    the nn.Modules), so no APPLY_MODEL wrapper is needed.
+
+    ``model`` compiles the whole diffusion_model through comfy's official
+    wrapper — only sensible for guide-free recipes (see compile_scope).
+    """
+    import torch
 
     if scope == "blocks":
         diffusion_model = model_patcher.get_model_object("diffusion_model")
-        num_blocks = len(diffusion_model.transformer_blocks)
-        keys = [f"diffusion_model.transformer_blocks.{i}" for i in range(num_blocks)]
+        blocks = list(diffusion_model.transformer_blocks)
+        # Shared code objects accumulate one dynamo entry per served shape —
+        # and the ACCUMULATED limit counts every entry across all code
+        # objects (DiT blocks x shapes + TE + VAE). Overflow is a silent
+        # eager fallback; raise both proportionally to the fan-out, and only
+        # ever raise (import order must not clobber a higher value).
+        cfg = torch._dynamo.config
+        needed = max(64, 16 * len(blocks))
+        cfg.recompile_limit = max(cfg.recompile_limit, needed)
+        cfg.accumulated_recompile_limit = max(cfg.accumulated_recompile_limit, 4 * needed)
+        for block in blocks:
+            block.forward = torch.compile(block.forward, backend="inductor", mode="default",
+                                          fullgraph=False, dynamic=False)
+        logger.info("[%s] torch.compile attached to %d block forwards "
+                    "(shared code object — one trace per shape)", label, len(blocks))
     elif scope == "model":
-        keys = ["diffusion_model"]
+        from comfy_api.torch_helpers import set_torch_compile_wrapper
+        set_torch_compile_wrapper(model_patcher, backend="inductor", mode="default",
+                                  fullgraph=False, dynamic=False, keys=["diffusion_model"])
+        logger.info("[%s] torch.compile attached (whole diffusion_model)", label)
     else:
         raise ValueError(f"compile_scope must be 'model' or 'blocks', got {scope!r}")
-
-    set_torch_compile_wrapper(model_patcher, backend="inductor", mode="default",
-                              fullgraph=False, dynamic=False, keys=keys)
-    logger.info("[%s] torch.compile attached (scope=%s, %d module(s))", label, scope, len(keys))
 
 
 def log_dynamo_counters(tag: str, log=logger.info) -> None:
