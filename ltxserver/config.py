@@ -195,6 +195,19 @@ class ServerConfig:
     # A/B and fast iteration; the stage-2 transformer and the upsampler are
     # not loaded when this is false.
     stage2_enabled: bool = True
+    # Stage-1 conditioning mechanism:
+    #   guide   — the workflow's appended keyframes (BatchAddGuide): extra
+    #             guide-frame tokens, keyframe bookkeeping in every forward,
+    #             optional attention bias. The reference-quality recipe.
+    #   inplace — the FastVideo recipe: write the first frame INTO latent
+    #             frame 0 (hard pin, strength 1.0) and the optional last
+    #             frame at -1 (pinned at the request's last_frame_strength).
+    #             No appended tokens, no keyframe machinery — stage-1
+    #             forwards as clean (and as fast) as stage 2. guide_strength
+    #             and guide_attention_bias are unused in this mode.
+    #             Switching modes changes the stage-1 sequence length, so
+    #             compiled graphs re-warm on first use.
+    stage1_conditioning: str = "guide"  # guide | inplace
     # Guide (first/last frame) conditioning.
     # guide_attention_bias: the workflow's log(strength) content<->guide
     # self-attention attenuation. It forces stage-1 attn1 onto a segmented
@@ -279,6 +292,9 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
     cvd = cfg.cuda_visible_devices
     if cvd and not all(p.strip().isdigit() for p in cvd.split(",")):
         raise ValueError(f"{source}: cuda_visible_devices must be comma-separated GPU indices")
+    if cfg.stage1_conditioning not in ("guide", "inplace"):
+        raise ValueError(f"{source}: stage1_conditioning must be guide | inplace, "
+                         f"got {cfg.stage1_conditioning!r}")
     if cfg.compile_scope not in ("model", "blocks"):
         raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
     if cfg.attention_backend not in ("sdpa", "fa4"):

@@ -76,6 +76,10 @@ highvram: true              # pin all models in GPU memory (required for serving
 # stg_layers_indices: ""
 # stg_scale_values: []
 # skip_steps_sigma_threshold: 1.0
+# stage1_conditioning: inplace  # guide (default, workflow keyframes) | inplace
+#                               # (FastVideo recipe: pin first frame 1.0 / tail
+#                               # at last_frame_strength IN the latent — no
+#                               # keyframe tokens, stage-1 as clean as stage-2)
 # guide_strength: 0.8
 # guide_attention_bias: false   # skip the guide attention mask: stage-1 attn1
 #                               # becomes one unmasked call (FA4-eligible);

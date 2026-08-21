@@ -60,6 +60,21 @@ closest-resolution configured mode. FLF: a `last_frame` upload adds a
 tail keyframe in stage 1 (`frame_indices "0, -1"`, batched when its
 strength equals `guide_strength`, appended separately otherwise).
 
+## Stage-1 conditioning modes
+
+`stage1_conditioning: guide` (default) is the workflow's appended-keyframe
+mechanism — guide-frame tokens in the sequence, per-forward keyframe
+bookkeeping, optional attention bias. `inplace` is the FastVideo recipe:
+the first frame is hard-pinned (strength 1.0) into latent frame 0 and an
+optional last frame partially pinned at the request's
+`last_frame_strength` — no keyframe tokens exist, so stage-1 forwards are
+as clean and as fast as stage 2's. `guide_strength` /
+`guide_attention_bias` only apply to guide mode. The two modes produce
+different stage-1 sequence lengths, so switching re-warms the compiled
+graphs (both sets coexist in a persistent inductor cache). Whether inplace
+costs quality ON THE CORRECTED STAGE-2 WEIGHTS is an open A/B — the old
+comparison predates that fix.
+
 ## Performance: torch.compile + FA4
 
 Both are off by default; the default configuration runs stock comfy modules

@@ -148,6 +148,7 @@ class LtxRecipe:
         # Vendored under custom_nodes_ext/ltxplus and registered by comfy's
         # custom-node scan during boot.
         self.batch_add_guide_cls = find_node_class(nodes, "LTXPlusBatchAddGuide")
+        self.img_inplace_at_cls = find_node_class(nodes, "LTXPlusImgInplaceAt")
         logger.info("models loaded in %.1fs", time.perf_counter() - t0)
 
     # ------------------------------------------------------------------
@@ -210,32 +211,50 @@ class LtxRecipe:
             # optional FLF tail keyframe — batched into the same call when it
             # shares the strength, else appended in its own call. Chained calls
             # are exactly chained LTXVAddGuide nodes (append semantics).
-            guide_batches: list[tuple[object, str, float]] = []
-            strengths_note = f"strength={cfg.guide_strength}"
-            if cfg.stage2_enabled:
-                strengths_note += f", stage1 {s1_width}x{s1_height}"
+            guide_last = None
             if request.last_frame_path:
                 guide_last = load_guide_image(request.last_frame_path, cfg.guide_longer_size)
                 if image_crf and image_crf > 0:
                     (guide_last,) = call_node(lt.LTXVPreprocess, image=guide_last,
                                               img_compression=int(image_crf))
-                if abs(request.last_frame_strength - cfg.guide_strength) < 1e-6:
-                    guide_batches.append((torch.cat([guide_first, guide_last], dim=0),
-                                          "0, -1", cfg.guide_strength))
+
+            if cfg.stage1_conditioning == "inplace":
+                # FastVideo semantics: first frame hard-pinned IN the latent,
+                # optional tail partially pinned — no keyframe tokens at all,
+                # so none of the keyframe bookkeeping runs in the forwards.
+                strengths_note = "inplace first=1.0"
+                (lat_video,) = call_node(self.img_inplace_at_cls, vae=self.vae,
+                                         image=guide_first[0:1], latent=lat_video,
+                                         index=0, strength=1.0)
+                if guide_last is not None:
+                    strengths_note += f", tail={request.last_frame_strength}"
+                    (lat_video,) = call_node(self.img_inplace_at_cls, vae=self.vae,
+                                             image=guide_last[0:1], latent=lat_video,
+                                             index=-1,
+                                             strength=request.last_frame_strength)
+            else:
+                guide_batches: list[tuple[object, str, float]] = []
+                strengths_note = f"strength={cfg.guide_strength}"
+                if guide_last is not None:
+                    if abs(request.last_frame_strength - cfg.guide_strength) < 1e-6:
+                        guide_batches.append((torch.cat([guide_first, guide_last], dim=0),
+                                              "0, -1", cfg.guide_strength))
+                    else:
+                        guide_batches.append((guide_first, "0", cfg.guide_strength))
+                        guide_batches.append((guide_last, "-1", request.last_frame_strength))
+                        strengths_note += f", tail strength={request.last_frame_strength}"
                 else:
                     guide_batches.append((guide_first, "0", cfg.guide_strength))
-                    guide_batches.append((guide_last, "-1", request.last_frame_strength))
-                    strengths_note += f", tail strength={request.last_frame_strength}"
-            else:
-                guide_batches.append((guide_first, "0", cfg.guide_strength))
 
-            for batch_images, frame_indices, strength in guide_batches:
-                pos, neg, lat_video = call_node(self.batch_add_guide_cls, positive=pos,
-                                                negative=neg, vae=self.vae, latent=lat_video,
-                                                images=batch_images,
-                                                frame_indices=frame_indices,
-                                                strength=strength,
-                                                attention_bias=cfg.guide_attention_bias)
+                for batch_images, frame_indices, strength in guide_batches:
+                    pos, neg, lat_video = call_node(self.batch_add_guide_cls, positive=pos,
+                                                    negative=neg, vae=self.vae, latent=lat_video,
+                                                    images=batch_images,
+                                                    frame_indices=frame_indices,
+                                                    strength=strength,
+                                                    attention_bias=cfg.guide_attention_bias)
+            if cfg.stage2_enabled:
+                strengths_note += f", stage1 {s1_width}x{s1_height}"
 
             (av_latent,) = call_node(lt.LTXVConcatAVLatent, video_latent=lat_video,
                                      audio_latent=lat_audio)
@@ -274,21 +293,25 @@ class LtxRecipe:
             # stage 2, which older comfy tolerated silently). Stage 2 then
             # runs guide-free — its first-frame anchoring is the
             # LTXVImgToVideoInplace keyframe, exactly as in the workflow.
-            pos2, neg2, v1_cropped = call_node(lt.LTXVCropGuides, positive=pos,
-                                               negative=neg, latent=v1)
+            if cfg.stage1_conditioning == "guide":
+                pos2, neg2, v1_clean = call_node(lt.LTXVCropGuides, positive=pos,
+                                                 negative=neg, latent=v1)
+            else:
+                # inplace mode appends no keyframes — nothing to crop.
+                pos2, neg2, v1_clean = pos, neg, v1
 
             if not cfg.stage2_enabled:
                 # Stage-1-only: decode the cropped stage-1 latent directly at
                 # the mode resolution (audio likewise comes from stage 1 —
                 # the refine pass would otherwise also touch it).
-                (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v1_cropped)
+                (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v1_clean)
                 (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a1,
                                          audio_vae=self.audio_vae)
                 return self._package(image_batch, audio_out, mode, request,
                                      strengths_note, t0, t_stage1, t_stage1)
 
             (upsampled,) = call_node(h.nodes_lt_upsampler.LTXVLatentUpsampler,
-                                     samples=v1_cropped, upscale_model=self.upscale_model,
+                                     samples=v1_clean, upscale_model=self.upscale_model,
                                      vae=self.vae)
             (inplace,) = call_node(lt.LTXVImgToVideoInplace, vae=self.vae,
                                    image=guide_first[0:1], latent=upsampled,
