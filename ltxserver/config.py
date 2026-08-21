@@ -160,12 +160,18 @@ class ServerConfig:
     # (observed breaking whole-model graphs on stage 1). model = one graph
     # per DiT, only sensible for guide-free recipes.
     compile_scope: str = "blocks"  # blocks | model
-    # The causal video VAE decodes in VARIABLE-length temporal chunks and
-    # dispatches blocks by python index, so whole-decode compilation thrashes
-    # dynamo (recompile-limit hits on chunk sizes 15/16/17, untraceable
-    # thread-ident calls) and can end up slower than eager. Off by default;
-    # opt-in compiles with dynamic shapes and a raised recompile budget.
-    compile_vae: bool = False
+    # Compile the video VAE codec (decode + encode). Requires single-shot
+    # mode (vae_decode_chunk_mib: -1, the default): the causal convs are
+    # first swapped for stateless bit-identical twins (the originals key a
+    # streaming cache by thread id on every forward — untraceable), then
+    # decode/encode compile with static per-mode shapes.
+    compile_vae: bool = True
+    # Compile the gemma text encoder (prompts are left-padded to a fixed
+    # 1024 tokens, so shapes are static). bf16 TEs compile as-is; comfy
+    # fp8_e4m3fn (per-tensor scaled) TEs get the same bit-verified fp8 twin
+    # swap as the DiT. Block-scaled TEs (mxfp8/nvfp4) are NOT compilable —
+    # the swap rejects them with a clear error; set false for those.
+    compile_te: bool = True
     # Temporal chunk budget for the causal video VAE, in MiB. comfy targets
     # consumer GPUs and hard-caps this at 128 MiB, shredding a server-GPU
     # decode into hundreds of tiny temporal chunks (launch + conv-cache
@@ -321,6 +327,9 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
                          f"got {cfg.stage1_conditioning!r}")
     if cfg.vae_decode_chunk_mib < -1:
         raise ValueError(f"{source}: vae_decode_chunk_mib must be -1 (single-shot), 0 (comfy default) or > 0")
+    if cfg.compile and cfg.compile_vae and cfg.vae_decode_chunk_mib != -1:
+        raise ValueError(f"{source}: compile_vae requires single-shot decoding "
+                         "(vae_decode_chunk_mib: -1) — chunked shapes thrash dynamo")
     if cfg.compile_scope not in ("model", "blocks"):
         raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
     if cfg.attention_backend not in ("sdpa", "fa4"):

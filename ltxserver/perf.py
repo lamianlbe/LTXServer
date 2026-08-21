@@ -126,8 +126,9 @@ def _build_fp8_linear_class():
     return _Fp8ScaledLinear
 
 
-def prepare_model_for_compile(model_patcher, label: str) -> int:
-    """Swap QuantizedTensor fp8 linears for compile-friendly twins, in place.
+def swap_fp8_linears(root_module, label: str) -> int:
+    """Swap QuantizedTensor fp8 linears under ``root_module`` for
+    compile-friendly twins, in place.
 
     Every swapped layer is verified BIT-IDENTICAL to the module it replaces
     on a random probe input before the swap is kept; any deviation aborts
@@ -139,11 +140,10 @@ def prepare_model_for_compile(model_patcher, label: str) -> int:
     from comfy.quant_ops import QuantizedTensor
 
     cls = _build_fp8_linear_class()
-    diffusion_model = model_patcher.get_model_object("diffusion_model")
 
     swapped = 0
     with torch.no_grad():
-        for name, module in list(diffusion_model.named_modules()):
+        for name, module in list(root_module.named_modules()):
             weight = getattr(module, "weight", None)
             if not isinstance(weight, QuantizedTensor):
                 continue
@@ -173,13 +173,17 @@ def prepare_model_for_compile(model_patcher, label: str) -> int:
                         f"{label}.{name} [{tag}]: compile-friendly fp8 linear is NOT bit-identical "
                         f"to the comfy layer it would replace (max diff {max_diff}); refusing to "
                         "compile. A comfy/comfy_kitchen upgrade likely changed fp8 numerics — re-verify.")
-            comfy.utils.set_attr(diffusion_model, name, twin)
+            comfy.utils.set_attr(root_module, name, twin)
             swapped += 1
 
     logger.info("[%s] %d fp8 linear(s) swapped for compile-friendly twins (probe: bit-identical)",
                 label, swapped)
     return swapped
 
+
+def prepare_model_for_compile(model_patcher, label: str) -> int:
+    """fp8-twin swap over a ModelPatcher's diffusion model."""
+    return swap_fp8_linears(model_patcher.get_model_object("diffusion_model"), label)
 
 def _plain_tensors(weight):
     """(payload, scale) from a QuantizedTensor via its layout class."""
@@ -219,13 +223,96 @@ def log_dynamo_counters(tag: str, log=logger.info) -> None:
             sorted(counters["graph_break"].items(), key=lambda kv: -kv[1])[:3]))
 
 
-def compile_vae_decode(vae, *, label: str) -> None:
-    """torch.compile the video VAE's decode path.
+def _build_singleshot_conv_class():
+    import torch
 
-    The comfy ``VAE`` wrapper calls ``self.first_stage_model.decode(...)``;
-    wrapping that bound method compiles the whole decoder while leaving
-    comfy's tiling/memory fallbacks (which call the same method) intact.
-    Decode shapes are fixed per mode, so warmup covers every graph.
+    class SingleShotCausalConv3d(torch.nn.Module):
+        """Stateless twin of comfy's CausalConv3d for single-shot runs.
+
+        The original keys a temporal streaming cache by threading.get_ident()
+        on EVERY forward — an untraceable builtin that graph-breaks dynamo at
+        each conv. With the chunk budget unlimited every forward sees the
+        whole sequence, so the cache is semantically dead: the fresh-state +
+        ended path reduces to replicate-padding the first frame (and, for
+        non-causal calls, the last frame) and running the conv. This module
+        is exactly that math and nothing else — pure aten, fully traceable.
+
+        Deliberately NOT a CausalConv3d subclass and carries no
+        ``temporal_cache_state``: comfy's mark_conv3d_ended / cache-pop walks
+        skip it by isinstance/hasattr.
+        """
+
+        def __init__(self, orig):
+            super().__init__()
+            self.conv = orig.conv
+            self.time_kernel_size = orig.time_kernel_size
+            self.out_channels = orig.out_channels
+
+        def forward(self, x, causal: bool = True):
+            import torch as _t
+            padding_length = self.time_kernel_size - 1
+            if not causal:
+                padding_length = padding_length // 2
+            pieces = [x[:, :, :1, :, :].repeat((1, 1, padding_length, 1, 1)), x]
+            if not causal:
+                pieces.append(x[:, :, -1:, :, :].repeat(
+                    (1, 1, (self.time_kernel_size - 1) // 2, 1, 1)))
+            return self.conv(_t.cat(pieces, dim=2))
+
+    return SingleShotCausalConv3d
+
+
+def swap_causal_convs(first_stage_model, label: str) -> int:
+    """Swap every CausalConv3d for its stateless single-shot twin, in place.
+
+    Probe-verified BIT-IDENTICAL against the original conv in its
+    single-shot state (fresh cache + ended). Only valid when the VAE chunk
+    budget is unlimited — the caller enforces that.
+    """
+    import threading
+
+    import torch
+    import comfy.utils
+    from comfy.ldm.lightricks.vae.causal_conv3d import CausalConv3d
+
+    cls = _build_singleshot_conv_class()
+    device = next(first_stage_model.parameters()).device
+    dtype = next(first_stage_model.parameters()).dtype
+    tid = threading.get_ident()
+
+    swapped = 0
+    with torch.no_grad():
+        for name, module in list(first_stage_model.named_modules()):
+            if not isinstance(module, CausalConv3d):
+                continue
+            twin = cls(module)
+            in_ch = module.conv.in_channels
+            probe = torch.randn(1, in_ch, 5, 8, 8, device=device, dtype=dtype)
+            for causal in (True, False):
+                module.temporal_cache_state[tid] = (None, True)  # fresh + ended
+                ref = module(probe, causal=causal)
+                module.temporal_cache_state.pop(tid, None)
+                got = twin(probe, causal=causal)
+                if not torch.equal(ref, got):
+                    max_diff = (ref.float() - got.float()).abs().max().item()
+                    raise RuntimeError(
+                        f"{label}.{name} (causal={causal}): single-shot conv twin is NOT "
+                        f"bit-identical (max diff {max_diff}); refusing to compile the VAE.")
+            comfy.utils.set_attr(first_stage_model, name, twin)
+            swapped += 1
+
+    logger.info("[%s] %d causal conv(s) swapped for stateless single-shot twins "
+                "(probe: bit-identical)", label, swapped)
+    return swapped
+
+
+def compile_vae_codec(vae, *, label: str) -> None:
+    """Compile the video VAE's decode AND encode paths.
+
+    Requires single-shot mode (unlimited chunk budget): shapes are then
+    static per mode, and after the causal convs are swapped for stateless
+    twins nothing on the path graph-breaks. Comfy's OOM->tiled retry at the
+    wrapper level still works (it calls the same compiled methods).
     """
     import torch
 
@@ -233,14 +320,39 @@ def compile_vae_decode(vae, *, label: str) -> None:
     if model is None or not hasattr(model, "decode"):
         logger.warning("[%s] VAE has no first_stage_model.decode — not compiled", label)
         return
-    # The causal decoder runs variable-length temporal chunks (15/16/17
-    # frames) through python-index block dispatch: static shapes thrash the
-    # recompile limit, so compile with dynamic shapes and a bigger budget.
-    torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 128)
+    swap_causal_convs(model, label)
     model.decode = torch.compile(model.decode, backend="inductor", mode="default",
-                                 fullgraph=False, dynamic=True)
-    logger.info("[%s] torch.compile attached to the video VAE decode (dynamic shapes)", label)
+                                 fullgraph=False, dynamic=False)
+    if hasattr(model, "encode"):
+        model.encode = torch.compile(model.encode, backend="inductor", mode="default",
+                                     fullgraph=False, dynamic=False)
+    logger.info("[%s] torch.compile attached to the video VAE decode + encode", label)
 
+
+def compile_text_encoder(clip, *, label: str) -> None:
+    """fp8-twin swap + torch.compile for the LTXAV gemma text encoder.
+
+    The tokenizer left-pads every prompt to 1024 tokens, so shapes are
+    static. Works with bf16 TEs (nothing to swap) and comfy_quant
+    fp8_e4m3fn TEs (per-tensor scaled — the same layout as the DiT, handled
+    by the same bit-verified twin swap). Block-scaled formats (mxfp8/nvfp4)
+    are rejected by the swap's layout check with a clear error.
+    """
+    import torch
+
+    te_model = getattr(clip, "cond_stage_model", None)
+    if te_model is None:
+        logger.warning("[%s] clip has no cond_stage_model — not compiled", label)
+        return
+    swap_fp8_linears(te_model, label)
+    gemma = getattr(te_model, "gemma3_12b", None)
+    transformer = getattr(gemma, "transformer", None)
+    if transformer is None:
+        logger.warning("[%s] gemma transformer not found — not compiled", label)
+        return
+    gemma.transformer = torch.compile(transformer, backend="inductor", mode="default",
+                                      fullgraph=False, dynamic=False)
+    logger.info("[%s] torch.compile attached to the gemma text encoder", label)
 
 def set_vae_chunk_budget(chunk_mib: int) -> None:
     """Raise the causal video VAE's temporal chunk budget.

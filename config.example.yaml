@@ -40,8 +40,10 @@ warmup_on_start: true
 # startup (probe-verified); compile: false runs stock comfy modules.
 # compile: true
 # compile_scope: blocks      # blocks (default; outer guide bookkeeping stays eager) | model
-# compile_vae: false          # VAE decode compile is experimental (variable
-#                             # temporal chunks thrash dynamo); leave off
+# compile_vae: true           # video VAE decode+encode (needs single-shot mode;
+#                             # causal convs swapped for bit-identical twins)
+# compile_te: true            # gemma text encoder (fixed 1024-token shapes;
+#                             # bf16 or fp8_e4m3fn TEs only — NOT mxfp8/nvfp4)
 # vae_decode_chunk_mib: -1    # default: single-shot VAE decode/encode (no
                               # temporal chunking — comfy's 128 MiB consumer
                               # cap removed; exact same math). 0 = comfy stock

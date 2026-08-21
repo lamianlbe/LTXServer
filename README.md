@@ -111,6 +111,15 @@ tensor-core rate, bf16 out. fp8 attention is sm100-only upstream: **B200
 yes, H200 bf16-FA4 only.** The kernel calls are torch custom ops with fake
 kernels, so FA4 composes with `compile: true`.
 
+`compile_vae: true` (default, needs single-shot mode) compiles the video
+VAE decode+encode after swapping comfy's causal convs for stateless
+bit-identical twins (the originals consult a thread-keyed streaming cache
+on every forward — untraceable, and dead code in single-shot mode).
+`compile_te: true` (default) compiles the gemma text encoder — prompts are
+left-padded to a fixed 1024 tokens so shapes are static; bf16 and
+fp8_e4m3fn (per-tensor scaled) TEs are supported, block-scaled TEs
+(mxfp8/nvfp4) are rejected with a clear error (set `compile_te: false`).
+
 Every combination changes the compiled graphs — re-warm after toggling.
 A/B with `scripts/bench.py`:
 

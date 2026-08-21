@@ -52,8 +52,11 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
             prepare_model_for_compile(patcher, label)
             compile_model(patcher, scope=cfg.compile_scope, label=label)
         if cfg.compile_vae:
-            from .perf import compile_vae_decode
-            compile_vae_decode(recipe.vae, label="vae")
+            from .perf import compile_vae_codec
+            compile_vae_codec(recipe.vae, label="vae")
+        if cfg.compile_te:
+            from .perf import compile_text_encoder
+            compile_text_encoder(recipe.clip, label="te")
 
     return recipe
 
