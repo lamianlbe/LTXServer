@@ -33,6 +33,25 @@ logger = logging.getLogger("ltxserver.perf")
 _FP8_LAYOUTS = ("TensorCoreFP8E4M3Layout", "TensorCoreFP8Layout")
 
 
+def ensure_dynamo_limits(fan_out: int = 48) -> None:
+    """(Re)assert the dynamo recompile budgets — raise-only, idempotent.
+
+    Shared code objects (48 DiT blocks, the VAE's resnet blocks across
+    levels, gemma layers) accumulate one cache entry per distinct shape;
+    the torch defaults (8 per code object / 256 accumulated) silently fall
+    back to eager when exceeded. Something in the stack has been observed
+    resetting the limit back to 8 after our setup (culprit unidentified —
+    torch default value, not a comfy write), so this is called at every
+    compile-attach point AND per generation.
+    """
+    import torch
+
+    cfg = torch._dynamo.config
+    needed = max(64, 16 * fan_out)
+    cfg.recompile_limit = max(cfg.recompile_limit, needed)
+    cfg.accumulated_recompile_limit = max(cfg.accumulated_recompile_limit, 8 * needed)
+
+
 def apply_inductor_settings() -> None:
     """Process-wide compile settings, applied once before the first compile."""
     import torch
@@ -43,10 +62,7 @@ def apply_inductor_settings() -> None:
     inductor.coordinate_descent_tuning = True
     inductor.coordinate_descent_check_all_directions = True
     inductor.epilogue_fusion = False
-    # Shapes accumulate per code object: modes x stages x (cond batched with
-    # uncond or not) x blocks sharing one forward. Keep well clear of the
-    # default limit so dynamo never silently falls back to eager.
-    torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
+    ensure_dynamo_limits()
 
 
 class Fp8ScaledLinear:  # replaced below — kept as a name for type checks
@@ -269,15 +285,7 @@ def compile_model(model_patcher, *, scope: str, label: str) -> None:
     if scope == "blocks":
         diffusion_model = model_patcher.get_model_object("diffusion_model")
         blocks = list(diffusion_model.transformer_blocks)
-        # Shared code objects accumulate one dynamo entry per served shape —
-        # and the ACCUMULATED limit counts every entry across all code
-        # objects (DiT blocks x shapes + TE + VAE). Overflow is a silent
-        # eager fallback; raise both proportionally to the fan-out, and only
-        # ever raise (import order must not clobber a higher value).
-        cfg = torch._dynamo.config
-        needed = max(64, 16 * len(blocks))
-        cfg.recompile_limit = max(cfg.recompile_limit, needed)
-        cfg.accumulated_recompile_limit = max(cfg.accumulated_recompile_limit, 4 * needed)
+        ensure_dynamo_limits(len(blocks))
         for block in blocks:
             block.forward = torch.compile(block.forward, backend="inductor", mode="default",
                                           fullgraph=False, dynamic=False)
@@ -394,26 +402,34 @@ def swap_causal_convs(first_stage_model, label: str) -> int:
 
 
 def compile_vae_codec(vae, *, label: str) -> None:
-    """Compile the video VAE's decode AND encode paths.
+    """Regional torch.compile for the video VAE: the ResnetBlock3D forwards.
 
-    Requires single-shot mode (unlimited chunk budget): shapes are then
-    static per mode, and after the causal convs are swapped for stateless
-    twins nothing on the path graph-breaks. Comfy's OOM->tiled retry at the
-    wrapper level still works (it calls the same compiled methods).
+    Method-level decode/encode compilation drags comfy's orchestration into
+    dynamo — the run_up recursion specializes per level index, the
+    space/depth resamplers keep thread-keyed streaming caches
+    (threading.get_ident, untraceable), and per-level temporal sizes pile
+    shape entries onto one code object. The resnet blocks are the compute
+    mass and contain ONLY (twinned) causal convs, norms and pointwise math,
+    so they trace into single clean graphs; every instance shares one code
+    object, costing one dynamo entry per distinct level shape. Everything
+    else (resamplers, recursion, chunk bookkeeping) stays eager — it is
+    cheap glue. Requires single-shot mode so the level shapes are static.
     """
     import torch
+    from comfy.ldm.lightricks.vae.causal_video_autoencoder import ResnetBlock3D
 
     model = getattr(vae, "first_stage_model", None)
     if model is None or not hasattr(model, "decode"):
         logger.warning("[%s] VAE has no first_stage_model.decode — not compiled", label)
         return
     swap_causal_convs(model, label)
-    model.decode = torch.compile(model.decode, backend="inductor", mode="default",
-                                 fullgraph=False, dynamic=False)
-    if hasattr(model, "encode"):
-        model.encode = torch.compile(model.encode, backend="inductor", mode="default",
-                                     fullgraph=False, dynamic=False)
-    logger.info("[%s] torch.compile attached to the video VAE decode + encode", label)
+    blocks = [m for m in model.modules() if isinstance(m, ResnetBlock3D)]
+    ensure_dynamo_limits(max(48, len(blocks)))
+    for block in blocks:
+        block.forward = torch.compile(block.forward, backend="inductor", mode="default",
+                                      fullgraph=False, dynamic=False)
+    logger.info("[%s] torch.compile attached to %d VAE resnet block forwards "
+                "(resamplers/orchestration stay eager)", label, len(blocks))
 
 
 def compile_text_encoder(clip, *, label: str) -> None:
@@ -437,6 +453,7 @@ def compile_text_encoder(clip, *, label: str) -> None:
     if transformer is None:
         logger.warning("[%s] gemma transformer not found — not compiled", label)
         return
+    ensure_dynamo_limits()
     gemma.transformer = torch.compile(transformer, backend="inductor", mode="default",
                                       fullgraph=False, dynamic=False)
     logger.info("[%s] torch.compile attached to the gemma text encoder", label)

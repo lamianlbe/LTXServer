@@ -190,6 +190,13 @@ class LtxRecipe:
             phases[name] = phases.get(name, 0.0) + (now - _last[0])
             _last[0] = now
 
+        if cfg.compile:
+            # Something in the stack resets dynamo's recompile budget back to
+            # the default 8 (silent eager fallback past it) — re-assert
+            # before every generation; raise-only, effectively free.
+            from .perf import ensure_dynamo_limits
+            ensure_dynamo_limits()
+
         with self._lock, torch.no_grad():
             # --- text conditioning (CLIPTextEncode -> LTXVConditioning) ------
             (pos,) = call_node(n.CLIPTextEncode, clip=self.clip, text=request.prompt)
