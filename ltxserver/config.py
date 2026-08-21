@@ -166,6 +166,15 @@ class ServerConfig:
     # thread-ident calls) and can end up slower than eager. Off by default;
     # opt-in compiles with dynamic shapes and a raised recompile budget.
     compile_vae: bool = False
+    # Temporal chunk budget for the causal video VAE, in MiB. comfy hard-caps
+    # this at 128 MiB for every GPU with >= 24GB VRAM, which shreds a B200
+    # decode into hundreds of tiny temporal chunks (launch + cache overhead —
+    # the dominant vdec cost). Chunked and unchunked decoding are exactly
+    # equivalent (causal conv caches), so raising this is a pure speed win.
+    # 0 = comfy default (128 MiB). Suggested: 32768 on B200 (near single-shot
+    # for 896x512x249), 8192 on H200. Too big simply OOMs into comfy's tiled
+    # retry — safe, just slow.
+    vae_decode_chunk_mib: int = 0
     inductor_cache_dir: str = ""  # "" = torch default (NOT persistent across restarts)
     # Attention backend for BOTH DiTs. sdpa = comfy's pytorch attention (the
     # exact baseline). fa4 = flash_attn.cute (Hopper/Blackwell datacenter
@@ -307,6 +316,8 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
     if cfg.stage1_conditioning not in ("guide", "inplace"):
         raise ValueError(f"{source}: stage1_conditioning must be guide | inplace, "
                          f"got {cfg.stage1_conditioning!r}")
+    if cfg.vae_decode_chunk_mib < 0:
+        raise ValueError(f"{source}: vae_decode_chunk_mib must be >= 0")
     if cfg.compile_scope not in ("model", "blocks"):
         raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
     if cfg.attention_backend not in ("sdpa", "fa4"):

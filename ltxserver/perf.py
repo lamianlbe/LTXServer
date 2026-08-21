@@ -240,3 +240,24 @@ def compile_vae_decode(vae, *, label: str) -> None:
     model.decode = torch.compile(model.decode, backend="inductor", mode="default",
                                  fullgraph=False, dynamic=True)
     logger.info("[%s] torch.compile attached to the video VAE decode (dynamic shapes)", label)
+
+
+def set_vae_chunk_budget(chunk_mib: int) -> None:
+    """Raise the causal video VAE's temporal chunk budget.
+
+    comfy's ``get_max_chunk_size`` caps the per-level activation chunk at
+    128 MiB on any GPU with >= 24GB VRAM — a B200-class decode gets split
+    into hundreds of tiny temporal chunks whose launch and conv-cache
+    overhead dominate the wall time. Chunked and unchunked decodes are
+    exactly equivalent (streaming causal convolutions carry state across
+    chunk edges), so the budget is a pure speed/VRAM trade. Overwrites the
+    module constants comfy reads on every decode; both bounds are set so
+    the heuristic returns the requested budget regardless of VRAM size.
+    """
+    from comfy.ldm.lightricks.vae import causal_video_autoencoder as cva
+
+    budget = int(chunk_mib) * 1024 ** 2
+    logger.info("video VAE chunk budget: %d MiB -> %d MiB",
+                cva.MAX_CHUNK_SIZE // 1024 ** 2, chunk_mib)
+    cva.MIN_CHUNK_SIZE = budget
+    cva.MAX_CHUNK_SIZE = budget

@@ -32,6 +32,10 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     )
     recipe = LtxRecipe(handles, cfg)
 
+    if cfg.vae_decode_chunk_mib > 0:
+        from .perf import set_vae_chunk_budget
+        set_vae_chunk_budget(cfg.vae_decode_chunk_mib)
+
     stage_models = [("stage1", recipe.model_s1, cfg.fa4_fp8_stage1)]
     if recipe.model_s2 is not None:
         stage_models.append(("stage2", recipe.model_s2, cfg.fa4_fp8_stage2))
