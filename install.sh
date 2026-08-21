@@ -52,6 +52,17 @@ if [ "${SKIP_FA4:-0}" != "1" ]; then
   }
 fi
 
+echo "== cudnn-frontend — for attention_backend: cudnn_mxfp8 =="
+# Python bindings for cuDNN's graph API (microscaled fp8 attention on
+# B200/B300; needs the cuDNN >= 9.21 backend torch already bundles).
+# Skippable: SKIP_CUDNN_FE=1.
+if [ "${SKIP_CUDNN_FE:-0}" != "1" ]; then
+  $PIP install "nvidia-cudnn-frontend[cutedsl]" || {
+    echo "WARNING: cudnn-frontend install failed; attention_backend: cudnn_mxfp8"
+    echo "         will not be available (sdpa/fa4 are unaffected)."
+  }
+fi
+
 $PY -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 command -v ffmpeg >/dev/null || echo "NOTE: no system ffmpeg — the imageio-ffmpeg bundle will be used"
 echo "OK. Run:  $PY -m ltxserver --config config.yaml"

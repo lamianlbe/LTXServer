@@ -51,10 +51,14 @@ warmup_on_start: true
                               # cap removed; exact same math). 0 = comfy stock
                               # heuristic for small-VRAM debug boxes
 # inductor_cache_dir: /workspace/inductor_cache
-# FA4 attention (flash_attn.cute; sm90+ — H200/B200). Masked segments (the
-# stage-1 guide bias) always stay on SDPA. fp8 attention per stage is
-# sm100-only (B200): q/k/v e4m3 with per-head descales, bf16 out.
-# attention_backend: fa4     # sdpa (default, exact) | fa4
+# Attention backend. Masked segments (the stage-1 guide bias) always stay
+# on SDPA. fa4 = flash_attn.cute, sm90+ (H200/B200); fa4_fp8_stage1/2 run
+# that stage in fp8 with per-head descales — fast but the coarse scaling
+# visibly desaturates LTX-2 output. cudnn_mxfp8 = cuDNN microscaled fp8
+# (one E8M0 scale per 32-element block; V protected per token group) at
+# the same fp8 rate — B200/B300 only, cuDNN >= 9.21, and
+# `pip install 'nvidia-cudnn-frontend[cutedsl]'` (install.sh does this).
+# attention_backend: cudnn_mxfp8   # sdpa (default, exact) | fa4 | cudnn_mxfp8
 # fa4_fp8_stage1: false
 # fa4_fp8_stage2: false
 

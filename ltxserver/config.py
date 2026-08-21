@@ -196,8 +196,14 @@ class ServerConfig:
     # attention segments (the stage-1 guide bias) always fall back to sdpa,
     # mirroring the FastVideo server. fa4_fp8_stage1/2 additionally run that
     # stage's unmasked attention with fp8 q/k/v (per-head descales) at the
-    # fp8 tensor-core rate — a numerics/speed trade to A/B per stage.
-    attention_backend: str = "sdpa"  # sdpa | fa4
+    # fp8 tensor-core rate — fast, but the coarse per-head scaling visibly
+    # desaturates LTX-2 output. cudnn_mxfp8 = cuDNN's Blackwell-native
+    # microscaled fp8 attention (one E8M0 scale per 32-element block —
+    # per-token-group V protection instead of one scale per head) at the
+    # same fp8 tensor-core rate; B200/B300 only, needs cuDNN >= 9.21 and
+    # `pip install 'nvidia-cudnn-frontend[cutedsl]'`. d=128 unmasked calls
+    # run MXFP8; audio attention (d=64) and masked segments stay on sdpa.
+    attention_backend: str = "sdpa"  # sdpa | fa4 | cudnn_mxfp8
     fa4_fp8_stage1: bool = False
     fa4_fp8_stage2: bool = False
 
@@ -337,12 +343,14 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
                          "(vae_decode_chunk_mib: -1) — chunked shapes thrash dynamo")
     if cfg.compile_scope not in ("model", "blocks"):
         raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
-    if cfg.attention_backend not in ("sdpa", "fa4"):
-        raise ValueError(f"{source}: attention_backend must be sdpa | fa4, got {cfg.attention_backend!r}")
+    if cfg.attention_backend not in ("sdpa", "fa4", "cudnn_mxfp8"):
+        raise ValueError(f"{source}: attention_backend must be sdpa | fa4 | cudnn_mxfp8, "
+                         f"got {cfg.attention_backend!r}")
     if (cfg.fa4_fp8_stage1 or cfg.fa4_fp8_stage2) and cfg.attention_backend != "fa4":
         raise ValueError(f"{source}: fa4_fp8_stage1/2 require attention_backend: fa4")
-    if cfg.attention_backend == "fa4" and cfg.use_sage_attention:
-        raise ValueError(f"{source}: attention_backend: fa4 and use_sage_attention are mutually exclusive")
+    if cfg.attention_backend != "sdpa" and cfg.use_sage_attention:
+        raise ValueError(f"{source}: attention_backend: {cfg.attention_backend} and "
+                         "use_sage_attention are mutually exclusive")
     n_stg = len(cfg.resolved_stg_scale_values())
     if n_stg < len(sig) - 1:
         raise ValueError(f"{source}: stg_scale_values needs at least {len(sig) - 1} entries")
