@@ -179,6 +179,16 @@ class LtxRecipe:
         n = h.nodes
         lt, lta, ncs = h.nodes_lt, h.nodes_lt_audio, h.nodes_custom_sampler
         t0 = time.perf_counter()
+        phases: dict[str, float] = {}
+        _last = [t0]
+
+        def mark(name: str) -> None:
+            # Honest GPU phase timing: drain queued work before reading the clock.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            now = time.perf_counter()
+            phases[name] = phases.get(name, 0.0) + (now - _last[0])
+            _last[0] = now
 
         with self._lock, torch.no_grad():
             # --- text conditioning (CLIPTextEncode -> LTXVConditioning) ------
@@ -188,6 +198,7 @@ class LtxRecipe:
             (neg,) = call_node(n.CLIPTextEncode, clip=self.clip, text=negative_text)
             pos, neg = call_node(lt.LTXVConditioning, positive=pos, negative=neg,
                                  frame_rate=float(mode.fps))
+            mark("text")
 
             # --- empty AV latents (stage-1 render size; mode = FINAL size) ---
             s1_width, s1_height = self._stage1_dims(mode)
@@ -259,6 +270,8 @@ class LtxRecipe:
             (av_latent,) = call_node(lt.LTXVConcatAVLatent, video_latent=lat_video,
                                      audio_latent=lat_audio)
 
+            mark("cond")
+
             # --- stage 1: STG guider + euler_ancestral over eased sigmas -----
             (guider1,) = call_node(
                 self.stg_guider_cls, model=self.model_s1, positive=pos, negative=neg,
@@ -282,6 +295,7 @@ class LtxRecipe:
             (sigmas1,) = call_node(ncs.ManualSigmas, sigmas=_csv(cfg.stage1_sigmas))
             out1 = call_node(ncs.SamplerCustomAdvanced, noise=noise, guider=guider1,
                              sampler=sampler1, sigmas=sigmas1, latent_image=av_latent)[0]
+            mark("s1")
             t_stage1 = time.perf_counter()
             v1, a1 = call_node(lt.LTXVSeparateAVLatent, av_latent=out1)
 
@@ -305,10 +319,13 @@ class LtxRecipe:
                 # the mode resolution (audio likewise comes from stage 1 —
                 # the refine pass would otherwise also touch it).
                 (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v1_clean)
+                mark("vdec")
                 (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a1,
                                          audio_vae=self.audio_vae)
+                mark("adec")
                 return self._package(image_batch, audio_out, mode, request,
-                                     strengths_note, t0, t_stage1, t_stage1)
+                                     strengths_note, t0, t_stage1, t_stage1,
+                                     phases, mark)
 
             (upsampled,) = call_node(h.nodes_lt_upsampler.LTXVLatentUpsampler,
                                      samples=v1_clean, upscale_model=self.upscale_model,
@@ -325,6 +342,7 @@ class LtxRecipe:
             (sigmas2,) = call_node(ncs.ManualSigmas, sigmas=_csv(cfg.stage2_sigmas))
             out2 = call_node(ncs.SamplerCustomAdvanced, noise=noise, guider=guider2,
                              sampler=sampler2, sigmas=sigmas2, latent_image=av2)[0]
+            mark("s2")
             t_stage2 = time.perf_counter()
             v2, a2 = call_node(lt.LTXVSeparateAVLatent, av_latent=out2)
             # Guides were already cropped before the upsample, so the
@@ -332,28 +350,41 @@ class LtxRecipe:
 
             # --- decode -------------------------------------------------------
             (image_batch,) = call_node(n.VAEDecode, vae=self.vae, samples=v2)
+            mark("vdec")
             (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a2,
                                      audio_vae=self.audio_vae)
+            mark("adec")
             return self._package(image_batch, audio_out, mode, request,
-                                 strengths_note, t0, t_stage1, t_stage2)
+                                 strengths_note, t0, t_stage1, t_stage2,
+                                 phases, mark)
 
     def _package(self, image_batch, audio_out, mode: Mode, request: GenerationRequest,
-                 strengths_note: str, t0: float, t_stage1: float, t_stage2: float) -> dict:
+                 strengths_note: str, t0: float, t_stage1: float, t_stage2: float,
+                 phases: dict[str, float] | None = None, mark=None) -> dict:
         import torch
-        frames = [(frame.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
-                  for frame in image_batch]
+        # One batched clamp/cast and ONE device->host transfer for the whole
+        # clip (the per-frame loop this replaces issued one transfer per
+        # frame — hundreds of small syncing copies).
+        array = (image_batch.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
+        frames = list(array)
         waveform = audio_out["waveform"]
         audio_np = waveform[0].float().cpu().numpy() if waveform is not None else None
         sample_rate = int(audio_out.get("sample_rate", 0)) or None
+        if mark is not None:
+            mark("pack")
         gen_seconds = time.perf_counter() - t0
         stage2_seconds = t_stage2 - t_stage1
-        logger.info("generated %dx%d f%d seed=%s (%s): stage1 %.1fs, stage2 %s, total %.1fs",
+        phase_note = ""
+        if phases:
+            phase_note = " | " + " ".join(f"{k}={v:.1f}s" for k, v in phases.items())
+        logger.info("generated %dx%d f%d seed=%s (%s): stage1 %.1fs, stage2 %s, total %.1fs%s",
                     mode.width, mode.height, mode.num_frames, request.seed, strengths_note,
                     t_stage1 - t0, f"{stage2_seconds:.1f}s" if stage2_seconds > 0 else "skipped",
-                    gen_seconds)
+                    gen_seconds, phase_note)
         return {
             "frames": frames,
             "audio": audio_np,
             "audio_sample_rate": sample_rate,
             "gen_seconds": gen_seconds,
+            "phases": dict(phases or {}),
         }
