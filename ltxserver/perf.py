@@ -303,11 +303,18 @@ def compile_model(model_patcher, *, scope: str, label: str) -> None:
         raise ValueError(f"compile_scope must be 'model' or 'blocks', got {scope!r}")
 
 
-def dynamo_graph_count() -> int:
-    """Total dynamo graphs compiled so far. A per-generation delta > 0 means
-    something re-traced during serving — always a latency bug for us."""
-    from torch._dynamo.utils import counters
-    return int(counters["stats"].get("unique_graphs", 0))
+def dynamo_compile_progress() -> tuple[int, float]:
+    """(compile events so far, seconds spent in whole-frame compilation).
+
+    Read from dynamo's compilation_time_metrics, which records EVERY frame
+    compilation — including resume-function re-traces that the
+    stats.unique_graphs counter misses. A per-generation delta > 0 means
+    something re-traced during serving (first-hit latency)."""
+    from torch._dynamo.utils import compilation_time_metrics as metrics
+    events = sum(len(v) for v in metrics.values())
+    entire = [v for k, v in metrics.items() if "entire_frame_compile" in k]
+    seconds = sum(sum(v) for v in (entire or metrics.values()))
+    return events, float(seconds)
 
 
 def log_dynamo_counters(tag: str, log=logger.info) -> None:

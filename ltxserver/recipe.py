@@ -218,14 +218,14 @@ class LtxRecipe:
             phases[name] = phases.get(name, 0.0) + (now - _last[0])
             _last[0] = now
 
-        graphs_before = 0
+        compile_events_before, compile_secs_before = 0, 0.0
         if cfg.compile:
             # Something in the stack resets dynamo's recompile budget back to
             # the default 8 (silent eager fallback past it) — re-assert
             # before every generation; raise-only, effectively free.
-            from .perf import dynamo_graph_count, ensure_dynamo_limits
+            from .perf import dynamo_compile_progress, ensure_dynamo_limits
             ensure_dynamo_limits()
-            graphs_before = dynamo_graph_count()
+            compile_events_before, compile_secs_before = dynamo_compile_progress()
 
         # inference_mode, not no_grad: ComfyUI's executor wraps ALL node
         # execution in torch.inference_mode() (execution.py), so the
@@ -398,12 +398,14 @@ class LtxRecipe:
                                    strengths_note, t0, t_stage1, t_stage2,
                                    phases, mark)
         if cfg.compile:
-            from .perf import dynamo_graph_count
-            new_graphs = dynamo_graph_count() - graphs_before
-            if new_graphs:
-                logger.warning("dynamo compiled %d NEW graph(s) during this generation — "
-                               "first-hit latency (torch logs the failed guards above)",
-                               new_graphs)
+            from .perf import dynamo_compile_progress
+            events, secs = dynamo_compile_progress()
+            if events > compile_events_before:
+                logger.warning("dynamo re-traced during this generation: +%d compile "
+                               "event(s), ~%.1fs compile time — first-hit latency "
+                               "(torch logs the failed guards above)",
+                               events - compile_events_before,
+                               secs - compile_secs_before)
         return result
 
     def _package(self, image_batch, audio_out, mode: Mode, request: GenerationRequest,
