@@ -218,14 +218,19 @@ class LtxRecipe:
             phases[name] = phases.get(name, 0.0) + (now - _last[0])
             _last[0] = now
 
+        graphs_before = 0
         if cfg.compile:
             # Something in the stack resets dynamo's recompile budget back to
             # the default 8 (silent eager fallback past it) — re-assert
             # before every generation; raise-only, effectively free.
-            from .perf import ensure_dynamo_limits
+            from .perf import dynamo_graph_count, ensure_dynamo_limits
             ensure_dynamo_limits()
+            graphs_before = dynamo_graph_count()
 
-        with self._lock, torch.no_grad():
+        # inference_mode, not no_grad: ComfyUI's executor wraps ALL node
+        # execution in torch.inference_mode() (execution.py), so the
+        # reference workflow's tensors are inference tensors — match it.
+        with self._lock, torch.inference_mode():
             # --- text conditioning (CLIPTextEncode -> LTXVConditioning) ------
             (pos,) = call_node(n.CLIPTextEncode, clip=self.clip, text=request.prompt)
             negative_text = (request.negative_prompt
@@ -389,9 +394,17 @@ class LtxRecipe:
             (audio_out,) = call_node(lta.LTXVAudioVAEDecode, samples=a2,
                                      audio_vae=self.audio_vae)
             mark("adec")
-            return self._package(image_batch, audio_out, mode, request,
-                                 strengths_note, t0, t_stage1, t_stage2,
-                                 phases, mark)
+            result = self._package(image_batch, audio_out, mode, request,
+                                   strengths_note, t0, t_stage1, t_stage2,
+                                   phases, mark)
+        if cfg.compile:
+            from .perf import dynamo_graph_count
+            new_graphs = dynamo_graph_count() - graphs_before
+            if new_graphs:
+                logger.warning("dynamo compiled %d NEW graph(s) during this generation — "
+                               "first-hit latency (torch logs the failed guards above)",
+                               new_graphs)
+        return result
 
     def _package(self, image_batch, audio_out, mode: Mode, request: GenerationRequest,
                  strengths_note: str, t0: float, t_stage1: float, t_stage2: float,

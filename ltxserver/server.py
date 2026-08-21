@@ -122,6 +122,7 @@ def build_app(recipe, cfg: ServerConfig, s3_client=None) -> FastAPI:
 
     ready = threading.Event()
     app.state.ready = ready
+    app.state.s3_client = s3_client  # run_warmup warms this exact client's connection
 
     def require_ready() -> None:
         if not ready.is_set():
@@ -501,7 +502,7 @@ def main() -> None:
             try:
                 print(f"[server] warming up {len(cfg.modes)} mode(s) in the background; "
                       "/v1/* returns 503 until ready…")
-                run_warmup(recipe, cfg)
+                run_warmup(recipe, cfg, s3_client=app.state.s3_client)
                 app.state.ready.set()
                 print("[server] warmup complete; ready")
             except BaseException:  # noqa: BLE001

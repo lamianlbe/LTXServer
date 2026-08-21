@@ -61,6 +61,9 @@ def apply_inductor_settings() -> None:
     inductor.conv_1x1_as_mm = True
     inductor.coordinate_descent_tuning = True
     inductor.coordinate_descent_check_all_directions = True
+    # Print the failed guard whenever a compiled region re-traces: steady-state
+    # recompiles are always bugs here, and the reason is otherwise invisible.
+    torch._logging.set_logs(recompiles=True)
     inductor.epilogue_fusion = False
     ensure_dynamo_limits()
 
@@ -298,6 +301,13 @@ def compile_model(model_patcher, *, scope: str, label: str) -> None:
         logger.info("[%s] torch.compile attached (whole diffusion_model)", label)
     else:
         raise ValueError(f"compile_scope must be 'model' or 'blocks', got {scope!r}")
+
+
+def dynamo_graph_count() -> int:
+    """Total dynamo graphs compiled so far. A per-generation delta > 0 means
+    something re-traced during serving — always a latency bug for us."""
+    from torch._dynamo.utils import counters
+    return int(counters["stats"].get("unique_graphs", 0))
 
 
 def log_dynamo_counters(tag: str, log=logger.info) -> None:

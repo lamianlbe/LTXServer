@@ -69,7 +69,8 @@ def generate_for_mode(recipe: LtxRecipe, cfg: ServerConfig, mode: Mode,
     return result
 
 
-def make_warmup_image(path: str | Path, width: int, height: int) -> None:
+def make_warmup_image(path: str | Path, width: int, height: int,
+                      invert: bool = False) -> None:
     """Synthetic but structured conditioning image (diagonal gradient)."""
     import numpy as np
     from PIL import Image
@@ -84,17 +85,27 @@ def make_warmup_image(path: str | Path, width: int, height: int) -> None:
         ],
         axis=-1,
     ).astype(np.uint8)
+    if invert:
+        arr = 255 - arr
     Image.fromarray(arr).save(path)
 
 
-def run_warmup(recipe: LtxRecipe, cfg: ServerConfig, log=print) -> None:
-    """One generation per distinct mode shape: pushes every model through a
-    full pass (CUDA context, sage kernels, VAE tiling decisions) before real
-    traffic, and validates the encode path once."""
-    from .encoder import encode_video_h264
+def run_warmup(recipe: LtxRecipe, cfg: ServerConfig, log=print, s3_client=None) -> None:
+    """Mirror the REAL request flow before declaring ready, per distinct mode:
+    generation with first AND last conditioning frames, then the production
+    encode pattern (GPU LQ frames + HQ/LQ ffmpeg in a 2-thread pool), an S3
+    connection warm, and finally a steady-state re-generation of the first
+    mode — so the first real request pays no first-hit cost (compile caches,
+    CUDA allocator segment growth, boto3 TLS/auth) that warmup could have
+    absorbed."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .encoder import encode_video_h264, make_lq_frames
 
     seen: set[tuple[int, int, int, int]] = set()
     encode_checked = False
+    first_request: GenerationRequest | None = None
+    first_mode: Mode | None = None
     workdir = Path(tempfile.mkdtemp(prefix="ltxs_warmup_"))
     try:
         for mode in cfg.modes:
@@ -104,9 +115,17 @@ def run_warmup(recipe: LtxRecipe, cfg: ServerConfig, log=print) -> None:
                 continue
             seen.add(key)
             first = workdir / f"first_{mode.width}x{mode.height}.png"
+            last = workdir / f"last_{mode.width}x{mode.height}.png"
             make_warmup_image(first, mode.width, mode.height)
+            make_warmup_image(last, mode.width, mode.height, invert=True)
+            # last_frame included: real requests send one, and the last-frame
+            # conditioning path (inplace index=-1 / trailing guide) must be
+            # exercised before traffic.
             request = GenerationRequest(prompt=WARMUP_PROMPT, first_frame_path=str(first),
-                                        seed=42, last_frame_strength=cfg.last_frame_strength)
+                                        last_frame_path=str(last), seed=42,
+                                        last_frame_strength=cfg.last_frame_strength)
+            if first_request is None:
+                first_request, first_mode = request, mode
             t0 = time.perf_counter()
             log(f"[warmup] {mode.width}x{mode.height} f{mode.num_frames} fps{mode.fps}…")
             result = generate_for_mode(recipe, cfg, mode, request)
@@ -117,13 +136,52 @@ def run_warmup(recipe: LtxRecipe, cfg: ServerConfig, log=print) -> None:
                 log_dynamo_counters(f"warmup {mode.width}x{mode.height}", log=lambda m, *a: log(m % a))
             if not encode_checked:
                 encode_checked = True
-                seconds = encode_video_h264(
-                    result["frames"], mode.fps, workdir / "warmup.mp4",
-                    bitrate_kbps=cfg.video_bitrate_kbps, preset=cfg.x264_preset,
-                    audio=result.get("audio"),
-                    audio_sample_rate=result.get("audio_sample_rate"),
-                    threads=cfg.encode_threads, codec=cfg.video_codec,
-                    extra_video_args=cfg.extra_video_args)
-                log(f"[warmup] encode check passed ({seconds:.1f}s)")
+                # Production pattern (server /v1/generate_s3): GPU LQ frames,
+                # then HQ + LQ encodes concurrently in a 2-thread pool.
+                t_enc = time.perf_counter()
+                lq_frames = make_lq_frames(result["frames"], cfg.lq_blur_radius)
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    hq_f = pool.submit(
+                        encode_video_h264, result["frames"], mode.fps, workdir / "hq.mp4",
+                        bitrate_kbps=cfg.video_bitrate_kbps, preset=cfg.x264_preset,
+                        audio=result.get("audio"),
+                        audio_sample_rate=result.get("audio_sample_rate"),
+                        threads=cfg.encode_threads, codec=cfg.video_codec,
+                        extra_video_args=cfg.extra_video_args)
+                    lq_f = pool.submit(
+                        encode_video_h264, lq_frames, mode.fps, workdir / "lq.mp4",
+                        bitrate_kbps=cfg.lq_bitrate_kbps, preset=cfg.lq_x264_preset,
+                        profile="baseline", audio=result.get("audio"),
+                        audio_sample_rate=result.get("audio_sample_rate"),
+                        audio_bitrate_kbps=64, audio_mono=True,
+                        threads=cfg.encode_threads, codec=cfg.video_codec,
+                        extra_video_args=cfg.extra_video_args)
+                    hq_s, lq_s = hq_f.result(), lq_f.result()
+                log(f"[warmup] encode check passed (hq {hq_s:.1f}s + lq {lq_s:.1f}s, "
+                    f"wall {time.perf_counter() - t_enc:.1f}s)")
+        del result
+
+        if s3_client is not None and cfg.s3 is not None:
+            # Warm the server's boto3 client (DNS + TLS + auth) so the first
+            # real upload doesn't pay the handshake. No object is written.
+            try:
+                t_s3 = time.perf_counter()
+                s3_client.head_bucket(Bucket=cfg.s3.bucket)
+                log(f"[warmup] s3 connection warm ({time.perf_counter() - t_s3:.2f}s)")
+            except Exception as err:  # noqa: BLE001
+                log(f"[warmup] s3 warm skipped ({err})")
+
+        if first_request is not None and first_mode is not None:
+            # Steady-state check: re-run the first mode AFTER the encode so
+            # warmup itself absorbs any first-request-after-warmup residue
+            # (allocator reshaping, lingering guard misses). These numbers
+            # should match steady serving; if not, the dynamo-graph warning
+            # in the phase log says why.
+            first_request.seed = 43
+            t0 = time.perf_counter()
+            log("[warmup] steady-state check (re-run of first mode)…")
+            generate_for_mode(recipe, cfg, first_mode, first_request)
+            log(f"[warmup] steady-state check wall={time.perf_counter() - t0:.1f}s "
+                "(this should match real request latency)")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
