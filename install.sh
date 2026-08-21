@@ -18,11 +18,39 @@ fi
 echo "== submodules (ComfyUI + ComfyUI-LTXVideo, pinned) =="
 git submodule update --init --recursive
 
-echo "== torch (before comfy requirements so pip resolves against it) =="
-if [ "${FORCE_TORCH:-0}" != "1" ] && $PY -c "import torch" 2>/dev/null; then
-  $PY -c "import torch; print('torch already present:', torch.__version__, 'cuda', torch.version.cuda, '— skipping (FORCE_TORCH=1 to reinstall)')"
+echo "== torch >= 2.13 (before comfy requirements so pip resolves against it) =="
+# 2.13 is a hard floor: older dynamo cannot trace torch._scaled_mm_v2, so the
+# fp8-linear twins graph-break at EVERY quantized linear (compile still works
+# but the DiT shatters into dozens of graphs — the FastVideo-image torch 2.12
+# failure mode).
+if [ "${FORCE_TORCH:-0}" != "1" ] && $PY -c "
+import sys
+try:
+    import torch
+except Exception:
+    sys.exit(1)
+v = tuple(int(x) for x in torch.__version__.split('+')[0].split('.')[:2])
+sys.exit(0 if v >= (2, 13) else 1)
+" 2>/dev/null; then
+  $PY -c "import torch; print('torch already present and >= 2.13:', torch.__version__, 'cuda', torch.version.cuda, '— skipping (FORCE_TORCH=1 to reinstall)')"
 else
-  $PIP install torch torchvision torchaudio --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+  $PY -c "import torch; print('torch', torch.__version__, 'is < 2.13 — upgrading')" 2>/dev/null || true
+  $PIP install -U torch torchvision torchaudio --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+fi
+
+echo "== cuDNN backend >= 9.21 (attention_backend: cudnn_mxfp8 needs it) =="
+CUDNN_VER=$($PY -c "import torch; print(torch.backends.cudnn.version() or 0)" 2>/dev/null || echo 0)
+if [ "${CUDNN_VER}" -lt 92100 ]; then
+  CU_MAJ=$($PY -c "import torch; print((torch.version.cuda or '13').split('.')[0])" 2>/dev/null || echo 13)
+  echo "cudnn backend ${CUDNN_VER} < 92100 — upgrading nvidia-cudnn-cu${CU_MAJ}."
+  echo "(pip will warn that torch pins an older nvidia-cudnn — expected and harmless:"
+  echo " cuDNN minor versions are ABI-compatible and torch loads the newer one.)"
+  $PIP install -U "nvidia-cudnn-cu${CU_MAJ}" || {
+    echo "WARNING: cudnn upgrade failed; attention_backend: cudnn_mxfp8 will refuse"
+    echo "         to start (sdpa/fa4 are unaffected)."
+  }
+else
+  echo "cudnn backend ${CUDNN_VER} — OK"
 fi
 
 echo "== ComfyUI requirements =="
@@ -54,7 +82,7 @@ fi
 
 echo "== cudnn-frontend — for attention_backend: cudnn_mxfp8 =="
 # Python bindings for cuDNN's graph API (microscaled fp8 attention on
-# B200/B300; needs the cuDNN >= 9.21 backend torch already bundles).
+# B200/B300; the backend >= 9.21 requirement is checked/upgraded above).
 # Skippable: SKIP_CUDNN_FE=1.
 if [ "${SKIP_CUDNN_FE:-0}" != "1" ]; then
   $PIP install "nvidia-cudnn-frontend[cutedsl]" || {
@@ -63,6 +91,6 @@ if [ "${SKIP_CUDNN_FE:-0}" != "1" ]; then
   }
 fi
 
-$PY -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
+$PY -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cudnn', torch.backends.cudnn.version(), 'available', torch.cuda.is_available())"
 command -v ffmpeg >/dev/null || echo "NOTE: no system ffmpeg — the imageio-ffmpeg bundle will be used"
 echo "OK. Run:  $PY -m ltxserver --config config.yaml"
