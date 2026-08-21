@@ -61,6 +61,9 @@ warmup_on_start: true
 # attention_backend: cudnn_mxfp8   # sdpa (default, exact) | fa4 | cudnn_mxfp8
 # fa4_fp8_stage1: false
 # fa4_fp8_stage2: false
+# fa4_fp8_smooth_k: true     # subtract K's token-mean before fp8 quantization
+#                            # (softmax-invariant, tightens K's range; false =
+#                            # raw per-head fp8 for A/B)
 
 # --- ComfyUI runtime -------------------------------------------------------
 use_sage_attention: false   # SDPA (default, exact). Sage = opt-in experiment,

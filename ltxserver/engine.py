@@ -43,7 +43,8 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     if cfg.attention_backend == "fa4":
         from .attention import install_fa4_override
         for label, patcher, fp8 in stage_models:
-            install_fa4_override(patcher, fp8=fp8, label=label)
+            install_fa4_override(patcher, fp8=fp8, label=label,
+                                 smooth_k=cfg.fa4_fp8_smooth_k)
     elif cfg.attention_backend == "cudnn_mxfp8":
         from .attention_mxfp8 import install_mxfp8_override
         for label, patcher, _fp8 in stage_models:

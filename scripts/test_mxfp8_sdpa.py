@@ -87,6 +87,14 @@ def run_shape(b: int, h: int, s_q: int, s_kv: int, d: int) -> None:
             return torch.ops.ltxserver.fa4_fp8_forward(qf, kf, vf, qd, kd, vd)
 
         report("fa4_fp8", fa4_fp8(), ref, bench(fa4_fp8))
+
+        def fa4_fp8_smoothk():
+            qf, qd = fp8_quantize_for_fa4(q)
+            kf, kd = fp8_quantize_for_fa4(k - k.mean(dim=1, keepdim=True))
+            vf, vd = fp8_quantize_for_fa4(v)
+            return torch.ops.ltxserver.fa4_fp8_forward(qf, kf, vf, qd, kd, vd)
+
+        report("fa4_fp8+smK", fa4_fp8_smoothk(), ref, bench(fa4_fp8_smoothk))
     except ImportError as err:
         print(f"  fa4          skipped ({err})")
 

@@ -206,6 +206,11 @@ class ServerConfig:
     attention_backend: str = "sdpa"  # sdpa | fa4 | cudnn_mxfp8
     fa4_fp8_stage1: bool = False
     fa4_fp8_stage2: bool = False
+    # Smooth-K for FA4 fp8 (on by default): subtract K's token-axis mean
+    # before quantization — softmax-invariant (mathematically free), removes
+    # the channel mean offset that dominates K's per-head amax. Only K is
+    # tightened; set false to A/B the raw per-head fp8 quantization.
+    fa4_fp8_smooth_k: bool = True
 
     # --- recipe (defaults = the reference workflow) ---------------------------
     stage1_sigmas: list[float] = field(default_factory=lambda: list(DEFAULT_STAGE1_SIGMAS))

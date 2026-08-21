@@ -23,6 +23,13 @@ Numerics are a verbatim port of FastVideo's FA4 integration
     clamped min 1e-6, scale applied in the input dtype, saturating clamp to
     +-448, descale = amax/448 as float32 (batch, heads); the fp8 kernel
     always returns bf16;
+  * Smooth-K (on by default with fp8, ``smooth_k``): K's per-(batch, head,
+    channel) mean over the TOKEN axis is subtracted before quantization.
+    softmax(Q(K-mu)^T) == softmax(QK^T) exactly — the shift is constant per
+    query row — so this is mathematically free, and it removes the channel
+    mean offset that otherwise dominates K's per-head amax (SageAttention's
+    core trick). It tightens only K; V keeps the coarse per-head scale, so
+    for full per-block scaling see attention_backend: cudnn_mxfp8;
   * bf16 FA4 needs sm90+ (H200 ok); fp8 FA4 is sm100-only upstream (B200).
 
 Install pin (see install.sh): flash-attn @ 82d6441e subdirectory
@@ -112,7 +119,7 @@ def fp8_quantize_for_fa4(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return scaled.to(torch.float8_e4m3fn), amax / FP8_E4M3_MAX
 
 
-def _make_override(fp8: bool):
+def _make_override(fp8: bool, smooth_k: bool = True):
     def fa4_override(func, q, k, v, heads, *args, mask=None, attn_precision=None,
                      skip_reshape=False, skip_output_reshape=False, **kwargs):
         # Masked segments (guide bias) and anything FA4 cannot take run the
@@ -143,6 +150,10 @@ def _make_override(fp8: bool):
             return fallback()
 
         if fp8:
+            if smooth_k:
+                # Token-axis mean removal: softmax-invariant (constant shift
+                # per query row), tightens K's fp8 range.
+                k_b = k_b - k_b.mean(dim=1, keepdim=True)
             q_f, q_d = fp8_quantize_for_fa4(q_b)
             k_f, k_d = fp8_quantize_for_fa4(k_b)
             v_f, v_d = fp8_quantize_for_fa4(v_b)
@@ -160,7 +171,8 @@ def _make_override(fp8: bool):
     return fa4_override
 
 
-def install_fa4_override(model_patcher, *, fp8: bool, label: str) -> None:
+def install_fa4_override(model_patcher, *, fp8: bool, label: str,
+                         smooth_k: bool = True) -> None:
     """Preflight the hardware/install, then hook the override onto one model."""
     if not torch.cuda.is_available():
         raise RuntimeError("attention_backend: fa4 needs a CUDA device")
@@ -173,6 +185,9 @@ def install_fa4_override(model_patcher, *, fp8: bool, label: str) -> None:
     _register_ops()
 
     options = model_patcher.model_options.setdefault("transformer_options", {})
-    options["optimized_attention_override"] = _make_override(fp8)
+    options["optimized_attention_override"] = _make_override(fp8, smooth_k)
+    mode = "bf16"
+    if fp8:
+        mode = "fp8 e4m3, per-head descales" + (", smooth-K" if smooth_k else "")
     logger.info("[%s] FA4 attention override installed (%s; masked segments stay on the "
-                "default backend)", label, "fp8 e4m3, per-head descales" if fp8 else "bf16")
+                "default backend)", label, mode)
