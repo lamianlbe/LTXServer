@@ -418,6 +418,130 @@ def swap_causal_convs(first_stage_model, label: str) -> int:
     return swapped
 
 
+def _build_singleshot_resnet_forward():
+    import torch  # noqa: F401  (twin body runs under the caller's torch)
+
+    def forward(self, input_tensor, causal: bool = True, timestep=None):
+        """Single-shot twin of comfy's ResnetBlock3D.forward.
+
+        The body is a line-for-line copy of the original. ONLY the tail
+        differs: the original ends with a threading.get_ident()-keyed
+        exchange cache (chunk-stream residual splicing) — an untraceable
+        builtin that graph-breaks dynamo inside EVERY resnet block and
+        splits it into a main graph plus a resume function whose input
+        strides vary run-to-run (first-request re-trace storms). In
+        single-shot mode the exchange degenerates to the plain residual
+        sum: cache_in is always None, the split consumes the whole
+        shortcut, and the stashed tail is an empty slice the Encoder /
+        Decoder wrapper pops right after. The twin ends with exactly that
+        residual add — probe-verified bit-identical at startup.
+        """
+        hidden_states = input_tensor
+        batch_size = hidden_states.shape[0]
+
+        hidden_states = self.norm1(hidden_states)
+        if self.timestep_conditioning:
+            assert timestep is not None, "should pass timestep with timestep_conditioning=True"
+            ada_values = self.scale_shift_table[
+                None, ..., None, None, None
+            ].to(device=hidden_states.device, dtype=hidden_states.dtype) + timestep.reshape(
+                batch_size,
+                4,
+                -1,
+                timestep.shape[-3],
+                timestep.shape[-2],
+                timestep.shape[-1],
+            )
+            shift1, scale1, shift2, scale2 = ada_values.unbind(dim=1)
+
+            hidden_states = hidden_states * (1 + scale1) + shift1
+
+        hidden_states = self.non_linearity(hidden_states)
+
+        hidden_states = self.conv1(hidden_states, causal=causal)
+
+        if self.inject_noise:
+            hidden_states = self._feed_spatial_noise(
+                hidden_states,
+                self.per_channel_scale1.to(device=hidden_states.device, dtype=hidden_states.dtype),
+            )
+
+        hidden_states = self.norm2(hidden_states)
+
+        if self.timestep_conditioning:
+            hidden_states = hidden_states * (1 + scale2) + shift2
+
+        hidden_states = self.non_linearity(hidden_states)
+
+        hidden_states = self.dropout(hidden_states)
+
+        hidden_states = self.conv2(hidden_states, causal=causal)
+
+        if self.inject_noise:
+            hidden_states = self._feed_spatial_noise(
+                hidden_states,
+                self.per_channel_scale2.to(device=hidden_states.device, dtype=hidden_states.dtype),
+            )
+
+        input_tensor = self.norm3(input_tensor)
+
+        input_tensor = self.conv_shortcut(input_tensor)
+
+        hidden_states.add_(input_tensor)
+        return hidden_states
+
+    return forward
+
+
+def swap_resnet_forwards(first_stage_model, label: str) -> int:
+    """Patch every ResnetBlock3D.forward with the single-shot twin, in place.
+
+    Probe-verified BIT-IDENTICAL per block (RNG re-seeded around each run so
+    inject_noise blocks compare equal; timestep-conditioned blocks probed
+    with a broadcastable zero timestep). Must run AFTER swap_causal_convs so
+    both paths share the already-twinned convs and the probe isolates the
+    tail. Only valid in single-shot mode — the caller enforces that.
+    """
+    import threading
+    import types
+
+    import torch
+    from comfy.ldm.lightricks.vae.causal_video_autoencoder import ResnetBlock3D
+
+    twin = _build_singleshot_resnet_forward()
+    device = next(first_stage_model.parameters()).device
+    dtype = next(first_stage_model.parameters()).dtype
+    tid = threading.get_ident()
+
+    patched = 0
+    with torch.no_grad():
+        for name, module in list(first_stage_model.named_modules()):
+            if not isinstance(module, ResnetBlock3D):
+                continue
+            in_ch = module.conv1.in_channels
+            probe = torch.randn(1, in_ch, 5, 8, 8, device=device, dtype=dtype)
+            timestep = None
+            if module.timestep_conditioning:
+                timestep = torch.zeros(1, 4, 1, 1, 1, device=device, dtype=dtype)
+            for causal in (True, False):
+                torch.manual_seed(0xC0FFEE)  # inject_noise consumes global RNG
+                ref = module(probe.clone(), causal=causal, timestep=timestep)
+                module.temporal_cache_state.pop(tid, None)  # stashed empty tail
+                torch.manual_seed(0xC0FFEE)
+                got = twin(module, probe.clone(), causal=causal, timestep=timestep)
+                if not torch.equal(ref, got):
+                    max_diff = (ref.float() - got.float()).abs().max().item()
+                    raise RuntimeError(
+                        f"{label}.{name} (causal={causal}): single-shot resnet twin is NOT "
+                        f"bit-identical (max diff {max_diff}); refusing to compile the VAE.")
+            module.forward = types.MethodType(twin, module)
+            patched += 1
+
+    logger.info("[%s] %d resnet forward(s) patched single-shot (exchange-cache tail -> "
+                "plain residual; probe: bit-identical)", label, patched)
+    return patched
+
+
 def compile_vae_codec(vae, *, label: str) -> None:
     """Regional torch.compile for the video VAE: the ResnetBlock3D forwards.
 
@@ -426,11 +550,13 @@ def compile_vae_codec(vae, *, label: str) -> None:
     space/depth resamplers keep thread-keyed streaming caches
     (threading.get_ident, untraceable), and per-level temporal sizes pile
     shape entries onto one code object. The resnet blocks are the compute
-    mass and contain ONLY (twinned) causal convs, norms and pointwise math,
-    so they trace into single clean graphs; every instance shares one code
-    object, costing one dynamo entry per distinct level shape. Everything
-    else (resamplers, recursion, chunk bookkeeping) stays eager — it is
-    cheap glue. Requires single-shot mode so the level shapes are static.
+    mass and contain ONLY (twinned) causal convs, norms and pointwise math;
+    with their exchange-cache tail patched out (swap_resnet_forwards) they
+    trace into single clean graphs with no internal breaks; every instance
+    shares one code object, costing one dynamo entry per distinct level
+    shape. Everything else (resamplers, recursion, chunk bookkeeping) stays
+    eager — it is cheap glue. Requires single-shot mode so the level shapes
+    are static.
     """
     import torch
     from comfy.ldm.lightricks.vae.causal_video_autoencoder import ResnetBlock3D
@@ -440,6 +566,7 @@ def compile_vae_codec(vae, *, label: str) -> None:
         logger.warning("[%s] VAE has no first_stage_model.decode — not compiled", label)
         return
     swap_causal_convs(model, label)
+    swap_resnet_forwards(model, label)
     blocks = [m for m in model.modules() if isinstance(m, ResnetBlock3D)]
     ensure_dynamo_limits(max(48, len(blocks)))
     for block in blocks:
