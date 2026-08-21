@@ -166,15 +166,18 @@ class ServerConfig:
     # thread-ident calls) and can end up slower than eager. Off by default;
     # opt-in compiles with dynamic shapes and a raised recompile budget.
     compile_vae: bool = False
-    # Temporal chunk budget for the causal video VAE, in MiB. comfy hard-caps
-    # this at 128 MiB for every GPU with >= 24GB VRAM, which shreds a B200
-    # decode into hundreds of tiny temporal chunks (launch + cache overhead —
-    # the dominant vdec cost). Chunked and unchunked decoding are exactly
-    # equivalent (causal conv caches), so raising this is a pure speed win.
-    # 0 = comfy default (128 MiB). Suggested: 32768 on B200 (near single-shot
-    # for 896x512x249), 8192 on H200. Too big simply OOMs into comfy's tiled
-    # retry — safe, just slow.
-    vae_decode_chunk_mib: int = 0
+    # Temporal chunk budget for the causal video VAE, in MiB. comfy targets
+    # consumer GPUs and hard-caps this at 128 MiB, shredding a server-GPU
+    # decode into hundreds of tiny temporal chunks (launch + conv-cache
+    # overhead — the dominant vdec cost). Chunked and unchunked decoding are
+    # exactly equivalent (streaming causal conv caches), so on a dedicated
+    # server GPU the right answer is no chunking at all:
+    #   -1 (default) — unlimited: 100% single-shot decode AND encode.
+    #    0           — comfy's stock heuristic (128 MiB cap); for small-VRAM
+    #                  debug boxes together with gpu_only/highvram false.
+    #   >0           — explicit budget in MiB.
+    # An OOM under -1 falls back to comfy's tiled retry — slow but safe.
+    vae_decode_chunk_mib: int = -1
     inductor_cache_dir: str = ""  # "" = torch default (NOT persistent across restarts)
     # Attention backend for BOTH DiTs. sdpa = comfy's pytorch attention (the
     # exact baseline). fa4 = flash_attn.cute (Hopper/Blackwell datacenter
@@ -316,8 +319,8 @@ def validate_config(cfg: ServerConfig, source: str = "config") -> None:
     if cfg.stage1_conditioning not in ("guide", "inplace"):
         raise ValueError(f"{source}: stage1_conditioning must be guide | inplace, "
                          f"got {cfg.stage1_conditioning!r}")
-    if cfg.vae_decode_chunk_mib < 0:
-        raise ValueError(f"{source}: vae_decode_chunk_mib must be >= 0")
+    if cfg.vae_decode_chunk_mib < -1:
+        raise ValueError(f"{source}: vae_decode_chunk_mib must be -1 (single-shot), 0 (comfy default) or > 0")
     if cfg.compile_scope not in ("model", "blocks"):
         raise ValueError(f"{source}: compile_scope must be model | blocks, got {cfg.compile_scope!r}")
     if cfg.attention_backend not in ("sdpa", "fa4"):

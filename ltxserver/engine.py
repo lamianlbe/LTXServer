@@ -32,7 +32,7 @@ def create_recipe(cfg: ServerConfig) -> LtxRecipe:
     )
     recipe = LtxRecipe(handles, cfg)
 
-    if cfg.vae_decode_chunk_mib > 0:
+    if cfg.vae_decode_chunk_mib != 0:
         from .perf import set_vae_chunk_budget
         set_vae_chunk_budget(cfg.vae_decode_chunk_mib)
 

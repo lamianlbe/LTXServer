@@ -256,8 +256,13 @@ def set_vae_chunk_budget(chunk_mib: int) -> None:
     """
     from comfy.ldm.lightricks.vae import causal_video_autoencoder as cva
 
-    budget = int(chunk_mib) * 1024 ** 2
-    logger.info("video VAE chunk budget: %d MiB -> %d MiB",
-                cva.MAX_CHUNK_SIZE // 1024 ** 2, chunk_mib)
+    if chunk_mib < 0:
+        budget = 2 ** 62  # effectively unlimited: single-shot decode/encode
+        note = "unlimited (single-shot)"
+    else:
+        budget = int(chunk_mib) * 1024 ** 2
+        note = f"{chunk_mib} MiB"
+    logger.info("video VAE chunk budget: %d MiB -> %s",
+                cva.MAX_CHUNK_SIZE // 1024 ** 2, note)
     cva.MIN_CHUNK_SIZE = budget
     cva.MAX_CHUNK_SIZE = budget
