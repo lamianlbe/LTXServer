@@ -112,6 +112,9 @@ def run_warmup(recipe: LtxRecipe, cfg: ServerConfig, log=print) -> None:
             result = generate_for_mode(recipe, cfg, mode, request)
             log(f"[warmup] {mode.width}x{mode.height} f{mode.num_frames} "
                 f"wall={time.perf_counter() - t0:.1f}s")
+            if cfg.compile:
+                from .perf import log_dynamo_counters
+                log_dynamo_counters(f"warmup {mode.width}x{mode.height}", log=lambda m, *a: log(m % a))
             if not encode_checked:
                 encode_checked = True
                 seconds = encode_video_h264(
