@@ -166,12 +166,13 @@ class ServerConfig:
     # streaming cache by thread id on every forward — untraceable), then
     # decode/encode compile with static per-mode shapes.
     compile_vae: bool = True
-    # Compile the gemma text encoder (prompts are left-padded to a fixed
-    # 1024 tokens, so shapes are static). bf16 TEs compile as-is; comfy
-    # fp8_e4m3fn (per-tensor scaled) TEs get the same bit-verified fp8 twin
-    # swap as the DiT. Block-scaled TEs (mxfp8/nvfp4) are NOT compilable —
-    # the swap rejects them with a clear error; set false for those.
-    compile_te: bool = True
+    # Compile the gemma text encoder. Off by default: measured gain is small
+    # (text is <1s/request once the TE is resident) and it constrains the TE
+    # format — bf16 compiles as-is, per-tensor fp8_e4m3fn works via the twin
+    # swap, but block-scaled TEs (mxfp8/nvfp4) are rejected. Leaving this
+    # off lets the TE be ANY comfy-supported format, e.g. the nvfp4 file the
+    # original reference deployment used (smallest VRAM footprint).
+    compile_te: bool = False
     # Temporal chunk budget for the causal video VAE, in MiB. comfy targets
     # consumer GPUs and hard-caps this at 128 MiB, shredding a server-GPU
     # decode into hundreds of tiny temporal chunks (launch + conv-cache

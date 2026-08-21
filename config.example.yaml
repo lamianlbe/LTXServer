@@ -42,8 +42,9 @@ warmup_on_start: true
 # compile_scope: blocks      # blocks (default; outer guide bookkeeping stays eager) | model
 # compile_vae: true           # video VAE decode+encode (needs single-shot mode;
 #                             # causal convs swapped for bit-identical twins)
-# compile_te: true            # gemma text encoder (fixed 1024-token shapes;
-#                             # bf16 or fp8_e4m3fn TEs only — NOT mxfp8/nvfp4)
+# compile_te: false           # off by default: <1s/request at stake, and off
+#                             # means the TE can be ANY format incl the nvfp4
+#                             # reference file (smallest VRAM)
 # vae_decode_chunk_mib: -1    # default: single-shot VAE decode/encode (no
                               # temporal chunking — comfy's 128 MiB consumer
                               # cap removed; exact same math). 0 = comfy stock
